@@ -40,13 +40,15 @@ export const useAuthStore = create<AuthState>()(
       login: async (email, password) => {
         set({ isLoading: true });
         try {
-          const { data } = await apiClient.post<{
+          const { data: apiResponse } = await apiClient.post<ApiResponse<{
             accessToken?: string;
             requiresMfa?: boolean;
             mfaToken?: string;
             expiresIn?: number;
             tokenType?: string;
-          }>('/auth/login', { email, password });
+          }>>('/auth/login', { email, password });
+
+          const data = apiResponse.data;
 
           if (data.requiresMfa) {
             set({ isLoading: false });
@@ -65,12 +67,12 @@ export const useAuthStore = create<AuthState>()(
       },
 
       verifyMfa: async (code, mfaToken) => {
-        const { data } = await apiClient.post<{
+        const { data: apiResponse } = await apiClient.post<ApiResponse<{
           accessToken: string;
           expiresIn: number;
           tokenType: string;
-        }>('/auth/mfa/verify', { code, mfaToken });
-        setMemoryAccessToken(data.accessToken);
+        }>>('/auth/mfa/verify', { code, mfaToken });
+        setMemoryAccessToken(apiResponse.data.accessToken);
         set({ isAuthenticated: true });
         await get().fetchProfile();
       },

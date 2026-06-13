@@ -62,7 +62,7 @@ apiClient.interceptors.response.use(
         {},
         { withCredentials: true },
       );
-      const { accessToken } = data;
+      const { accessToken } = data.data;
       memoryAccessToken = accessToken;
       processQueue(null, accessToken);
       original.headers.Authorization = `Bearer ${accessToken}`;
