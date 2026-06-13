@@ -29,6 +29,7 @@ import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { PrismaService } from '../../../database/prisma.service';
+import { CacheService } from '../../../cache/cache.service';
 import { PERMISSIONS } from '@inventario/shared';
 import { generateSlug } from '@inventario/shared';
 import type { JwtPayload } from '@inventario/types';
@@ -49,33 +50,38 @@ class UpdateCategoryDto extends PartialType(CreateCategoryDto) {
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller('categories')
 export class CategoriesController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cache: CacheService,
+  ) {}
 
   @Get()
   @RequirePermissions(PERMISSIONS.CATEGORIES_READ)
   @ApiOperation({ summary: 'Árbol completo de categorías' })
   async findAll(@CurrentUser() user: JwtPayload, @Query('flat') flat?: string) {
     if (flat === 'true') {
-      return this.prisma.category.findMany({
-        where: { tenantId: user.tenantId, deletedAt: null },
-        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-      });
-    }
-    return this.prisma.category.findMany({
-      where: { tenantId: user.tenantId, parentId: null, deletedAt: null },
-      include: {
-        children: {
-          where: { deletedAt: null },
-          include: {
-            children: { where: { deletedAt: null }, include: { _count: { select: { products: true } } } },
-            _count: { select: { products: true } },
-          },
+      return this.cache.getOrSet(`CATS_FLAT:${user.tenantId}`, () =>
+        this.prisma.category.findMany({
+          where: { tenantId: user.tenantId, deletedAt: null },
           orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+        }), 300);
+    }
+    return this.cache.getOrSet(`CATS_TREE:${user.tenantId}`, () =>
+      this.prisma.category.findMany({
+        where: { tenantId: user.tenantId, parentId: null, deletedAt: null },
+        include: {
+          children: {
+            where: { deletedAt: null },
+            include: {
+              children: { where: { deletedAt: null }, include: { _count: { select: { products: true } } } },
+              _count: { select: { products: true } },
+            },
+            orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+          },
+          _count: { select: { products: true } },
         },
-        _count: { select: { products: true } },
-      },
-      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-    });
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      }), 300);
   }
 
   @Post()

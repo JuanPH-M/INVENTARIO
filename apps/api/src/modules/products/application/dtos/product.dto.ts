@@ -11,6 +11,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
@@ -42,7 +43,15 @@ export class CreateProductDto {
   @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) @Type(() => Number) taxRate?: number;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() taxIncluded?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsString() defaultLocation?: string;
-  @ApiPropertyOptional() @IsOptional() @IsObject() metadata?: Record<string, unknown>;
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsObject()
+  @Transform(({ value }) => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+    const dangerous = new Set(['__proto__', 'constructor', 'prototype']);
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([k]) => !dangerous.has(k)));
+  })
+  metadata?: Record<string, unknown>;
 }
 
 export class UpdateProductDto extends PartialType(CreateProductDto) {

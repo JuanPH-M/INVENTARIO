@@ -373,29 +373,32 @@ export class InventoryUseCase {
   }
 
   async getValuation(tenantId: string, branchId?: string) {
-    const stocks = await this.prisma.inventoryStock.findMany({
-      where: { tenantId, ...(branchId ? { branchId } : {}) },
-      include: { product: { select: { costPrice: true, salePrice: true, name: true } } },
-    });
+    const key = `INV_VALUATION:${tenantId}:${branchId ?? 'all'}`;
+    return this.cache.getOrSet(key, async () => {
+      const stocks = await this.prisma.inventoryStock.findMany({
+        where: { tenantId, ...(branchId ? { branchId } : {}) },
+        include: { product: { select: { costPrice: true, salePrice: true, name: true } } },
+      });
 
-    const result = stocks.map((s) => ({
-      productName: s.product.name,
-      quantity: Number(s.quantity),
-      costPrice: Number(s.product.costPrice),
-      salePrice: Number(s.product.salePrice),
-      costValue: Number(s.quantity) * Number(s.product.costPrice),
-      saleValue: Number(s.quantity) * Number(s.product.salePrice),
-    }));
+      const result = stocks.map((s) => ({
+        productName: s.product.name,
+        quantity: Number(s.quantity),
+        costPrice: Number(s.product.costPrice),
+        salePrice: Number(s.product.salePrice),
+        costValue: Number(s.quantity) * Number(s.product.costPrice),
+        saleValue: Number(s.quantity) * Number(s.product.salePrice),
+      }));
 
-    const totals = result.reduce(
-      (acc, r) => ({
-        totalCostValue: acc.totalCostValue + r.costValue,
-        totalSaleValue: acc.totalSaleValue + r.saleValue,
-        totalItems: acc.totalItems + r.quantity,
-      }),
-      { totalCostValue: 0, totalSaleValue: 0, totalItems: 0 },
-    );
+      const totals = result.reduce(
+        (acc, r) => ({
+          totalCostValue: acc.totalCostValue + r.costValue,
+          totalSaleValue: acc.totalSaleValue + r.saleValue,
+          totalItems: acc.totalItems + r.quantity,
+        }),
+        { totalCostValue: 0, totalSaleValue: 0, totalItems: 0 },
+      );
 
-    return { items: result, totals };
+      return { items: result, totals };
+    }, 60);
   }
 }

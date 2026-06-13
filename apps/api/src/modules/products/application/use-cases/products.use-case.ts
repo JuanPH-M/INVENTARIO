@@ -7,6 +7,7 @@ import {
 import * as QRCode from 'qrcode';
 import { PrismaService } from '../../../../database/prisma.service';
 import { StorageService } from '../../../../storage/storage.service';
+import { CacheService } from '../../../../cache/cache.service';
 import { parsePaginationParams, paginate } from '../../../../common/utils/pagination.util';
 import type { CreateProductDto, UpdateProductDto, CreateJewelryDetailsDto, GetProductsQueryDto } from '../dtos/product.dto';
 import type { PaginatedResponse } from '@inventario/types';
@@ -17,6 +18,7 @@ export class ProductsUseCase {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storageService: StorageService,
+    private readonly cache: CacheService,
   ) {}
 
   async create(dto: CreateProductDto, tenantId: string, createdById: string) {
@@ -75,42 +77,45 @@ export class ProductsUseCase {
 
   async findMany(tenantId: string, query: GetProductsQueryDto): Promise<PaginatedResponse<unknown>> {
     const { page, limit, skip } = parsePaginationParams(query.page, query.limit);
+    const cacheKey = `PROD_LIST:${tenantId}:${query.search ?? ''}:${query.status ?? ''}:${query.type ?? ''}:${query.categoryId ?? ''}:${query.supplierId ?? ''}:${page}:${limit}`;
 
-    const where: Prisma.ProductWhereInput = {
-      tenantId,
-      deletedAt: null,
-      ...(query.status ? { status: query.status } : {}),
-      ...(query.type ? { type: query.type } : {}),
-      ...(query.categoryId ? { categoryId: query.categoryId } : {}),
-      ...(query.supplierId ? { supplierId: query.supplierId } : {}),
-      ...(query.search
-        ? {
-            OR: [
-              { name: { contains: query.search, mode: 'insensitive' } },
-              { internalCode: { contains: query.search, mode: 'insensitive' } },
-              { barcode: { contains: query.search, mode: 'insensitive' } },
-              { sku: { contains: query.search, mode: 'insensitive' } },
-            ],
-          }
-        : {}),
-    };
+    return this.cache.getOrSet(cacheKey, async () => {
+      const where: Prisma.ProductWhereInput = {
+        tenantId,
+        deletedAt: null,
+        ...(query.status ? { status: query.status } : {}),
+        ...(query.type ? { type: query.type } : {}),
+        ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+        ...(query.supplierId ? { supplierId: query.supplierId } : {}),
+        ...(query.search
+          ? {
+              OR: [
+                { name: { contains: query.search, mode: 'insensitive' } },
+                { internalCode: { contains: query.search, mode: 'insensitive' } },
+                { barcode: { contains: query.search, mode: 'insensitive' } },
+                { sku: { contains: query.search, mode: 'insensitive' } },
+              ],
+            }
+          : {}),
+      };
 
-    const [items, total] = await Promise.all([
-      this.prisma.product.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          category: { select: { id: true, name: true } },
-          supplier: { select: { id: true, name: true } },
-          inventoryStock: { select: { branchId: true, quantity: true, reserved: true } },
-        },
-      }),
-      this.prisma.product.count({ where }),
-    ]);
+      const [items, total] = await Promise.all([
+        this.prisma.product.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: { createdAt: 'desc' },
+          include: {
+            category: { select: { id: true, name: true } },
+            supplier: { select: { id: true, name: true } },
+            inventoryStock: { select: { branchId: true, quantity: true, reserved: true } },
+          },
+        }),
+        this.prisma.product.count({ where }),
+      ]);
 
-    return paginate(items, total, page, limit);
+      return paginate(items, total, page, limit);
+    }, 10);
   }
 
   async findById(productId: string, tenantId: string) {

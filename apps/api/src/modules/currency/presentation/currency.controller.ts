@@ -16,6 +16,7 @@ import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { PrismaService } from '../../../database/prisma.service';
+import { CacheService } from '../../../cache/cache.service';
 import { PERMISSIONS } from '@inventario/shared';
 import type { JwtPayload } from '@inventario/types';
 
@@ -31,16 +32,20 @@ class SetExchangeRateDto {
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller('currency')
 export class CurrencyController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cache: CacheService,
+  ) {}
 
   @Get()
   @RequirePermissions(PERMISSIONS.CURRENCY_READ)
   @ApiOperation({ summary: 'Listar divisas disponibles' })
   async findAll() {
-    return this.prisma.currency.findMany({
-      where: { isActive: true },
-      orderBy: { code: 'asc' },
-    });
+    return this.cache.getOrSet('CURRENCIES', () =>
+      this.prisma.currency.findMany({
+        where: { isActive: true },
+        orderBy: { code: 'asc' },
+      }), 3600);
   }
 
   @Get('rates')
