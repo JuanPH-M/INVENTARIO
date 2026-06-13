@@ -3,8 +3,10 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
+  AlertTriangle,
   BarChart3,
   Box,
+  Brain,
   Building2,
   ChevronLeft,
   ClipboardList,
@@ -45,6 +47,7 @@ const navGroups: { title: string; items: NavItem[] }[] = [
     items: [
       { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
       { label: 'Analíticas', href: '/dashboard/analytics', icon: BarChart3, permission: 'analytics:read' },
+      { label: 'Inteligencia Artificial', href: '/dashboard/ai', icon: Brain, permission: 'ai:read' },
     ],
   },
   {
@@ -79,6 +82,7 @@ const navGroups: { title: string; items: NavItem[] }[] = [
     items: [
       { label: 'Sucursales', href: '/dashboard/branches', icon: Building2, permission: 'branches:read' },
       { label: 'Usuarios', href: '/dashboard/users', icon: Users, permission: 'users:read' },
+      { label: 'Incidencias', href: '/dashboard/incidents', icon: AlertTriangle, permission: 'incidents:read' },
       { label: 'Configuración', href: '/dashboard/settings', icon: Settings },
     ],
   },

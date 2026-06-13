@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../../database/prisma.service';
+import { CacheService } from '../../../../cache/cache.service';
 import { parsePaginationParams, paginate } from '../../../../common/utils/pagination.util';
 import { OUT_MOVEMENT_TYPES } from '../dtos/inventory.dto';
 import type { AdjustStockDto, TransferStockDto, PhysicalCountItemDto, GetMovementsQueryDto } from '../dtos/inventory.dto';
@@ -11,41 +12,55 @@ import type { Prisma } from '@prisma/client';
 
 @Injectable()
 export class InventoryUseCase {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cache: CacheService,
+  ) {}
 
   async getStock(tenantId: string, branchId?: string, productId?: string) {
-    return this.prisma.inventoryStock.findMany({
-      where: {
-        tenantId,
-        ...(branchId ? { branchId } : {}),
-        ...(productId ? { productId } : {}),
-      },
-      include: {
-        product: {
-          select: {
-            id: true, name: true, internalCode: true, barcode: true,
-            minStock: true, maxStock: true, unitOfMeasure: true, images: true,
-          },
+    const key = `INV_STOCK:${tenantId}:${branchId ?? 'all'}:${productId ?? 'all'}`;
+    return this.cache.getOrSet(
+      key,
+      () => this.prisma.inventoryStock.findMany({
+        where: {
+          tenantId,
+          ...(branchId ? { branchId } : {}),
+          ...(productId ? { productId } : {}),
         },
-        branch: { select: { name: true } },
-      },
-      orderBy: { product: { name: 'asc' } },
-    });
+        include: {
+          product: {
+            select: {
+              id: true, name: true, internalCode: true, barcode: true,
+              minStock: true, maxStock: true, unitOfMeasure: true, images: true,
+            },
+          },
+          branch: { select: { name: true } },
+        },
+        orderBy: { product: { name: 'asc' } },
+      }),
+      5,
+    );
   }
 
   async getLowStockAlerts(tenantId: string, branchId?: string) {
-    return this.prisma.inventoryStock.findMany({
-      where: {
-        tenantId,
-        ...(branchId ? { branchId } : {}),
-        product: { trackInventory: true, deletedAt: null },
+    const key = `INV_LOW_STOCK:${tenantId}:${branchId ?? 'all'}`;
+    return this.cache.getOrSet(
+      key,
+      async () => {
+        const stocks = await this.prisma.inventoryStock.findMany({
+          where: {
+            tenantId,
+            ...(branchId ? { branchId } : {}),
+            product: { trackInventory: true, deletedAt: null },
+          },
+          include: {
+            product: { select: { id: true, name: true, minStock: true, reorderPoint: true, unitOfMeasure: true } },
+            branch: { select: { name: true } },
+          },
+        });
+        return stocks.filter((s) => Number(s.quantity) <= Number(s.product.reorderPoint));
       },
-      include: {
-        product: { select: { id: true, name: true, minStock: true, reorderPoint: true, unitOfMeasure: true } },
-        branch: { select: { name: true } },
-      },
-    }).then((stocks) =>
-      stocks.filter((s) => Number(s.quantity) <= Number(s.product.reorderPoint)),
+      30,
     );
   }
 

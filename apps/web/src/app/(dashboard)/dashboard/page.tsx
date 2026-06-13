@@ -1,17 +1,14 @@
 'use client';
 
+import dynamic from 'next/dynamic';
 import { useQuery } from '@tanstack/react-query';
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend,
-} from 'recharts';
-import {
-  AlertTriangle, DollarSign, Package, ShoppingCart, TrendingDown, TrendingUp, Truck, Users,
+  AlertTriangle, DollarSign, Package, ShoppingCart, TrendingDown, TrendingUp, Truck,
 } from 'lucide-react';
 import { apiClient } from '@/lib/api-client';
 import { formatCurrency } from '@/lib/utils';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 
 type DashboardData = {
@@ -24,6 +21,11 @@ type DashboardData = {
 
 type TrendPoint = { date: string; revenue: number; transactions: number };
 type TopProduct = { productId: string; productName: string; _sum: { quantity: number; subtotal: number }; _count: { id: number } };
+
+const DashboardCharts = dynamic(() => import('./dashboard-charts'), {
+  loading: () => <Skeleton className="h-[340px] w-full rounded-lg" />,
+  ssr: false,
+});
 
 function StatCard({ title, value, sub, icon: Icon, highlight = false, isLoading }: {
   title: string; value: string; sub?: string; icon: React.ElementType; highlight?: boolean; isLoading: boolean;
@@ -56,7 +58,7 @@ export default function DashboardPage() {
     refetchInterval: 30_000,
   });
 
-  const { data: trend, isLoading: trendLoading } = useQuery<TrendPoint[]>({
+  const { data: trend = [], isLoading: trendLoading } = useQuery<TrendPoint[]>({
     queryKey: ['sales-trend'],
     queryFn: async () => {
       try {
@@ -67,7 +69,7 @@ export default function DashboardPage() {
     refetchInterval: 30_000,
   });
 
-  const { data: topProducts, isLoading: topLoading } = useQuery<TopProduct[]>({
+  const { data: topProducts = [], isLoading: topLoading } = useQuery<TopProduct[]>({
     queryKey: ['top-products'],
     queryFn: async () => {
       try {
@@ -77,8 +79,6 @@ export default function DashboardPage() {
     },
     refetchInterval: 30_000,
   });
-
-  const topChart = (topProducts ?? []).map(p => ({ name: p.productName, sold: Number(p._sum?.quantity ?? 0), revenue: Number(p._sum?.subtotal ?? 0) }));
 
   return (
     <div className="space-y-6">
@@ -126,76 +126,18 @@ export default function DashboardPage() {
               <p className="text-sm font-medium text-yellow-800 dark:text-yellow-200">
                 {data?.operations?.openIncidents} incidente(s) abierto(s)
               </p>
-              <p className="text-xs text-yellow-600 dark:text-yellow-400">Revisa el módulo de configuración</p>
+              <p className="text-xs text-yellow-600 dark:text-yellow-400">Revisa el módulo de incidencias</p>
             </div>
           </CardContent>
         </Card>
       )}
 
-      <Tabs defaultValue="trend">
-        <TabsList>
-          <TabsTrigger value="trend">Tendencia de ventas</TabsTrigger>
-          <TabsTrigger value="products">Top Productos</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="trend">
-          <Card>
-            <CardHeader>
-              <CardTitle>Ventas diarias — últimos 30 días</CardTitle>
-              <CardDescription>Ingresos y número de transacciones</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {trendLoading ? <Skeleton className="h-64 w-full" /> : (trend ?? []).length === 0 ? (
-                <p className="text-center text-muted-foreground py-16">Sin datos de ventas en los últimos 30 días</p>
-              ) : (
-                <ResponsiveContainer width="100%" height={260}>
-                  <AreaChart data={trend}>
-                    <defs>
-                      <linearGradient id="colorRev" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                    <XAxis dataKey="date" className="text-xs" tickFormatter={(v) => v.slice(5)} />
-                    <YAxis className="text-xs" tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
-                    <Tooltip formatter={(v: number, name: string) => [name === 'revenue' ? formatCurrency(v) : v, name === 'revenue' ? 'Ingresos' : 'Transacciones']} />
-                    <Legend formatter={(v) => v === 'revenue' ? 'Ingresos' : 'Transacciones'} />
-                    <Area type="monotone" dataKey="revenue" stroke="hsl(var(--primary))" fill="url(#colorRev)" />
-                    <Area type="monotone" dataKey="transactions" stroke="hsl(var(--chart-2))" fill="none" strokeDasharray="4 2" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="products">
-          <Card>
-            <CardHeader>
-              <CardTitle>Productos más vendidos</CardTitle>
-              <CardDescription>Por unidades e ingresos este mes</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {topLoading ? <Skeleton className="h-64 w-full" /> : topChart.length === 0 ? (
-                <p className="text-center text-muted-foreground py-16">Sin ventas registradas este mes</p>
-              ) : (
-                <ResponsiveContainer width="100%" height={260}>
-                  <BarChart data={topChart}>
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                    <XAxis dataKey="name" className="text-xs" />
-                    <YAxis className="text-xs" />
-                    <Tooltip formatter={(v: number, name: string) => [name === 'revenue' ? formatCurrency(v) : v, name === 'revenue' ? 'Ingresos' : 'Unidades']} />
-                    <Legend formatter={(v) => v === 'revenue' ? 'Ingresos' : 'Unidades vendidas'} />
-                    <Bar dataKey="sold" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} name="sold" />
-                    <Bar dataKey="revenue" fill="hsl(var(--chart-2))" radius={[4, 4, 0, 0]} name="revenue" />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+      <DashboardCharts
+        trend={trend}
+        topProducts={topProducts}
+        trendLoading={trendLoading}
+        topLoading={topLoading}
+      />
 
       {/* Resumen financiero */}
       <div className="grid gap-4 md:grid-cols-2">
@@ -246,7 +188,7 @@ export default function DashboardPage() {
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-muted-foreground">Incidentes abiertos</span>
-                  <Badge variant={data?.operations?.openIncidents ? 'warning' : 'secondary'}>{data?.operations?.openIncidents ?? 0}</Badge>
+                  <Badge variant={data?.operations?.openIncidents ? 'destructive' : 'secondary'}>{data?.operations?.openIncidents ?? 0}</Badge>
                 </div>
               </div>
             )}
