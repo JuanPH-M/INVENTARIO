@@ -1,0 +1,80 @@
+version: '3.9'
+
+name: inventario-saas-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: inventario_postgres_dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: inventario_dev
+      POSTGRES_USER: inventario
+      POSTGRES_PASSWORD: inventario_dev
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventario -d inventario_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: inventario_redis_dev
+    restart: unless-stopped
+    command: redis-server --requirepass inventario_redis --appendonly yes
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "inventario_redis", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Mailhog — email testing
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: inventario_mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  # PgAdmin — database GUI
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: inventario_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@inventario.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_LISTEN_PORT: 5050
+    ports:
+      - "5050:5050"
+    volumes:
+      - pgadmin_dev_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+
+  # Redis Commander — Redis GUI
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: inventario_redis_commander
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: local:redis:6379:0:inventario_redis
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:
+  pgadmin_dev_data:

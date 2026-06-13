@@ -1,0 +1,30 @@
+version: '3.9'
+
+name: inventario-saas-test
+
+services:
+  postgres_test:
+    image: postgres:16-alpine
+    container_name: inventario_postgres_test
+    environment:
+      POSTGRES_DB: inventario_test
+      POSTGRES_USER: inventario
+      POSTGRES_PASSWORD: inventario_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventario -d inventario_test"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  redis_test:
+    image: redis:7-alpine
+    container_name: inventario_redis_test
+    command: redis-server --requirepass inventario_test
+    ports:
+      - "6380:6379"
+    tmpfs:
+      - /data
