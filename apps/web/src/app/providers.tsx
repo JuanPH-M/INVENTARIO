@@ -44,7 +44,7 @@ function AuthInitializer({ children }: { children: ReactNode }) {
       fetchProfile();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isAuthenticated]);
 
   return <>{children}</>;
 }

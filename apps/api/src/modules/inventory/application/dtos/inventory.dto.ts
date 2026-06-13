@@ -1,5 +1,6 @@
 import {
   IsEnum,
+  IsISO8601,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -80,6 +81,6 @@ export class GetMovementsQueryDto {
   @ApiPropertyOptional() @IsOptional() @IsUUID() productId?: string;
   @ApiPropertyOptional() @IsOptional() @IsUUID() branchId?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() type?: string;
-  @ApiPropertyOptional() @IsOptional() dateFrom?: string;
-  @ApiPropertyOptional() @IsOptional() dateTo?: string;
+  @ApiPropertyOptional() @IsOptional() @IsISO8601() dateFrom?: string;
+  @ApiPropertyOptional() @IsOptional() @IsISO8601() dateTo?: string;
 }

@@ -53,6 +53,7 @@ export default function DashboardPage() {
       const { data } = await apiClient.get('/analytics/dashboard');
       return data.data;
     },
+    refetchInterval: 30_000,
   });
 
   const { data: trend, isLoading: trendLoading } = useQuery<TrendPoint[]>({
@@ -63,6 +64,7 @@ export default function DashboardPage() {
         return Array.isArray(data.data) ? data.data : [];
       } catch { return []; }
     },
+    refetchInterval: 30_000,
   });
 
   const { data: topProducts, isLoading: topLoading } = useQuery<TopProduct[]>({
@@ -73,6 +75,7 @@ export default function DashboardPage() {
         return Array.isArray(data.data) ? data.data : [];
       } catch { return []; }
     },
+    refetchInterval: 30_000,
   });
 
   const topChart = (topProducts ?? []).map(p => ({ name: p.productName, sold: Number(p._sum?.quantity ?? 0), revenue: Number(p._sum?.subtotal ?? 0) }));

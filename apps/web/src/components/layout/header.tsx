@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
-import { Bell, Menu, Moon, Search, Sun } from 'lucide-react';
+import { Menu, Moon, Search, Sun } from 'lucide-react';
 import { useUiStore } from '@/stores/ui.store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -109,9 +109,6 @@ export function Header({ title }: { title?: string }) {
           onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
         >
           {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-        </Button>
-        <Button variant="ghost" size="icon" className="h-8 w-8 relative">
-          <Bell className="h-4 w-4" />
         </Button>
       </div>
     </header>
