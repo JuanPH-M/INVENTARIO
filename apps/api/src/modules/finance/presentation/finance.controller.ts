@@ -6,8 +6,10 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
+import { ApiBearerAuth, ApiOperation, ApiProperty, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
+import { BadRequestException } from '@nestjs/common';
+import { Type } from 'class-transformer';
+import { IsDateString, IsIn, IsNotEmpty, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min } from 'class-validator';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
@@ -16,9 +18,18 @@ import { PrismaService } from '../../../database/prisma.service';
 import { parsePaginationParams, paginate } from '../../../common/utils/pagination.util';
 import type { JwtPayload } from '@inventario/types';
 
+class CreateTransactionDto {
+  @ApiProperty({ enum: ['income', 'expense'] }) @IsIn(['income', 'expense']) type!: 'income' | 'expense';
+  @ApiProperty() @IsString() @IsNotEmpty() @MaxLength(500) description!: string;
+  @ApiProperty() @IsNumber() @Min(0.01) @Type(() => Number) amount!: number;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() branchId?: string;
+  @ApiPropertyOptional({ example: '2026-10-09' }) @IsOptional() @IsDateString() transactionDate?: string;
+  @ApiPropertyOptional({ example: 'COP' }) @IsOptional() @IsString() @MaxLength(3) currency?: string;
+}
+
 @ApiTags('Finanzas')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('finance')
 export class FinanceController {
   constructor(private readonly prisma: PrismaService) {}
@@ -62,6 +73,31 @@ export class FinanceController {
       this.prisma.financialTransaction.count({ where }),
     ]);
     return paginate(items, total, p, l);
+  }
+
+  @Post('transactions')
+  @RequirePermissions(PERMISSIONS.FINANCE_CREATE)
+  @ApiOperation({ summary: 'Registrar un gasto o ingreso manual (arriendo, nómina, servicios, otros ingresos)' })
+  async createTransaction(@CurrentUser() user: JwtPayload, @Body() dto: CreateTransactionDto) {
+    const branchId = user.branchId ?? dto.branchId ?? null;
+    if (branchId) {
+      const branch = await this.prisma.branch.count({ where: { id: branchId, tenantId: user.tenantId, deletedAt: null } });
+      if (!branch) throw new BadRequestException('Sucursal no encontrada');
+    }
+    return this.prisma.financialTransaction.create({
+      data: {
+        tenantId: user.tenantId,
+        branchId,
+        type: dto.type,
+        description: dto.description,
+        amount: dto.amount,
+        currency: dto.currency ?? 'COP',
+        referenceType: 'manual',
+        transactionDate: dto.transactionDate ? new Date(dto.transactionDate) : new Date(),
+        createdById: user.sub,
+      },
+      include: { branch: { select: { name: true } } },
+    });
   }
 
   @Get('summary')

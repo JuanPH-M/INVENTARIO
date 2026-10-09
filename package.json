@@ -1,33 +1,31 @@
 {
-  "name": "inventario-saas",
+  "name": "inventario-pro",
   "version": "1.0.0",
   "private": true,
-  "description": "Enterprise SaaS Inventory Management Platform",
+  "description": "Inventario Pro — Plataforma de inventario, ventas y finanzas para negocios con una o muchas sedes",
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=9.0.0"
   },
   "scripts": {
     "build": "turbo run build",
-    "dev": "turbo run dev",
+    "dev": "turbo run dev --filter=@inventario/api --filter=@inventario/web",
     "test": "turbo run test",
-    "test:e2e": "turbo run test:e2e",
-    "lint": "turbo run lint",
+    "test:e2e": "pnpm --filter @inventario/api test:e2e",
     "typecheck": "turbo run typecheck",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,css,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,css,md}\"",
-    "clean": "turbo run clean && rm -rf node_modules",
-    "db:migrate": "pnpm --filter api prisma migrate dev",
-    "db:migrate:prod": "pnpm --filter api prisma migrate deploy",
-    "db:seed": "pnpm --filter api prisma db seed",
-    "db:studio": "pnpm --filter api prisma studio",
-    "db:generate": "pnpm --filter api prisma generate",
-    "docker:dev": "docker compose -f docker-compose.dev.yml up",
-    "docker:dev:build": "docker compose -f docker-compose.dev.yml up --build",
-    "docker:prod": "docker compose up",
-    "docker:prod:build": "docker compose up --build",
+    "clean": "turbo run clean",
+    "db:migrate": "pnpm --filter @inventario/api exec prisma migrate dev",
+    "db:migrate:prod": "pnpm --filter @inventario/api exec prisma migrate deploy",
+    "db:seed": "pnpm --filter @inventario/api prisma:seed",
+    "db:studio": "pnpm --filter @inventario/api exec prisma studio",
+    "db:generate": "pnpm --filter @inventario/api exec prisma generate",
+    "docker:dev": "docker compose -f docker-compose.dev.yml up -d",
+    "docker:prod": "docker compose up -d --build",
     "docker:down": "docker compose down",
-    "docker:clean": "docker compose down -v --remove-orphans"
+    "setup": "pnpm install && pnpm --filter @inventario/api exec prisma generate && pnpm db:migrate:prod && pnpm db:seed",
+    "check": "pnpm typecheck && pnpm test"
   },
   "devDependencies": {
     "@turbo/gen": "^2.3.3",
@@ -35,5 +33,7 @@
     "turbo": "^2.3.3",
     "typescript": "^5.7.2"
   },
-  "packageManager": "pnpm@9.15.4"
+  "packageManager": "pnpm@9.15.4",
+  "author": "JuanPH-M",
+  "license": "SEE LICENSE IN LICENSE"
 }

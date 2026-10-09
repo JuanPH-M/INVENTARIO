@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Ip,
@@ -9,20 +10,13 @@ import {
   Post,
   Req,
   Res,
-  Headers,
   UnauthorizedException,
-  UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import {
-  ApiBearerAuth,
-  ApiOperation,
-  ApiTags,
-} from '@nestjs/swagger';
-import { Throttle } from '@nestjs/throttler';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import { Public } from '../../../common/decorators/public.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { LoginUseCase } from '../application/use-cases/login.use-case';
 import { LogoutUseCase } from '../application/use-cases/logout.use-case';
 import { RefreshTokenUseCase } from '../application/use-cases/refresh-token.use-case';
@@ -30,26 +24,25 @@ import { MfaUseCase } from '../application/use-cases/mfa.use-case';
 import { ForgotPasswordUseCase } from '../application/use-cases/forgot-password.use-case';
 import { ChangePasswordUseCase } from '../application/use-cases/change-password.use-case';
 import { UpdateProfileUseCase } from '../application/use-cases/update-profile.use-case';
+import { GetProfileUseCase } from '../application/use-cases/get-profile.use-case';
 import {
-  LoginDto,
-  RefreshTokenDto,
-  VerifyMfaDto,
-  EnableMfaDto,
-  DisableMfaDto,
-  ForgotPasswordDto,
-  ResetPasswordDto,
   ChangePasswordDto,
+  DisableMfaDto,
+  EnableMfaDto,
+  ForgotPasswordDto,
+  LoginDto,
+  ResetPasswordDto,
   UpdateProfileDto,
+  VerifyMfaDto,
 } from '../application/dtos/login.dto';
-import { ConfigService } from '@nestjs/config';
-import { PrismaService } from '../../../database/prisma.service';
-import type { JwtPayload } from '@inventario/types';
+import type { JwtPayload, TokenResponse } from '@inventario/types';
+
+const REFRESH_COOKIE = 'refresh_token';
+const REFRESH_COOKIE_PATH = '/api/auth';
 
 @ApiTags('Autenticación')
 @Controller('auth')
 export class AuthController {
-  private readonly isDev: boolean;
-
   constructor(
     private readonly loginUseCase: LoginUseCase,
     private readonly logoutUseCase: LogoutUseCase,
@@ -58,147 +51,114 @@ export class AuthController {
     private readonly forgotPasswordUseCase: ForgotPasswordUseCase,
     private readonly changePasswordUseCase: ChangePasswordUseCase,
     private readonly updateProfileUseCase: UpdateProfileUseCase,
-    private readonly prisma: PrismaService,
-    private readonly config: ConfigService,
-  ) {
-    this.isDev = (this.config.get<string>('app.nodeEnv') ?? 'development') !== 'production';
+    private readonly getProfileUseCase: GetProfileUseCase,
+  ) {}
+
+  /**
+   * El refresh token viaja solo en una cookie HttpOnly (nunca accesible desde JS).
+   * `secure` se activa cuando la petición llega por HTTPS (o COOKIE_SECURE=true),
+   * lo que permite instalaciones en red local por HTTP sin romper el inicio de sesión.
+   */
+  private setRefreshCookie(req: Request, res: Response, token: string): void {
+    res.cookie(REFRESH_COOKIE, token, {
+      httpOnly: true,
+      secure: req.secure || process.env['COOKIE_SECURE'] === 'true',
+      sameSite: 'strict',
+      path: REFRESH_COOKIE_PATH,
+      maxAge: this.loginUseCase.refreshTokenTtlMs,
+    });
+  }
+
+  private clearRefreshCookie(res: Response): void {
+    res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH });
+    // Cookies emitidas por versiones anteriores usaban path "/"
+    res.clearCookie(REFRESH_COOKIE, { path: '/' });
+  }
+
+  private readRefreshCookie(req: Request): string | undefined {
+    return (req.cookies as Record<string, string> | undefined)?.[REFRESH_COOKIE];
+  }
+
+  private publicTokens(tokens: TokenResponse) {
+    return { accessToken: tokens.accessToken, expiresIn: tokens.expiresIn, tokenType: tokens.tokenType };
   }
 
   @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 5, ttl: 900 } })
+  @Throttle({ default: { limit: 10, ttl: 15 * 60_000 } })
   @ApiOperation({ summary: 'Iniciar sesión' })
   async login(
     @Body() dto: LoginDto,
     @Ip() ip: string,
-    @Headers('user-agent') userAgent: string,
+    @Headers('user-agent') userAgent: string | undefined,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
     const result = await this.loginUseCase.execute(dto, ip, userAgent ?? '');
     if (result.type === 'mfa_required') {
       return { requiresMfa: true, mfaToken: result.mfaToken };
     }
-    res.cookie('refresh_token', result.data.refreshToken, {
-      httpOnly: true,
-      secure: !this.isDev,
-      sameSite: 'strict',
-      maxAge: 7 * 24 * 3600 * 1000,
-    });
-    return { accessToken: result.data.accessToken, expiresIn: result.data.expiresIn, tokenType: result.data.tokenType };
+    this.setRefreshCookie(req, res, result.data.refreshToken);
+    return this.publicTokens(result.data);
   }
 
   @Public()
+  @SkipThrottle()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Renovar access token con refresh token' })
+  @ApiOperation({ summary: 'Renovar el access token usando la cookie de sesión' })
   async refresh(
     @Req() req: Request,
-    @Body() dto: RefreshTokenDto,
     @Ip() ip: string,
-    @Headers('user-agent') userAgent: string,
+    @Headers('user-agent') userAgent: string | undefined,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const refreshToken = (req.cookies as Record<string, string>)['refresh_token'];
-    if (!refreshToken) {
-      throw new UnauthorizedException('Refresh token no encontrado en cookie');
+    const refreshToken = this.readRefreshCookie(req);
+    if (!refreshToken) throw new UnauthorizedException('No hay sesión activa');
+    try {
+      const tokens = await this.refreshTokenUseCase.execute(refreshToken, ip, userAgent ?? '');
+      this.setRefreshCookie(req, res, tokens.refreshToken);
+      return this.publicTokens(tokens);
+    } catch (err) {
+      if (!(err instanceof UnauthorizedException && err.message === 'Sesión ya renovada')) {
+        this.clearRefreshCookie(res);
+      }
+      throw err;
     }
-    const tokens = await this.refreshTokenUseCase.execute(refreshToken, ip, userAgent ?? '');
-    res.cookie('refresh_token', tokens.refreshToken, {
-      httpOnly: true,
-      secure: !this.isDev,
-      sameSite: 'strict',
-      maxAge: 7 * 24 * 3600 * 1000,
-    });
-    return { accessToken: tokens.accessToken, expiresIn: tokens.expiresIn, tokenType: tokens.tokenType };
   }
 
   @Post('logout')
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Cerrar sesión' })
   async logout(
     @CurrentUser() user: JwtPayload,
-    @Body() body: { refreshToken?: string },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ) {
-    await this.logoutUseCase.execute(user.sub, user.sessionId, body.refreshToken);
+    await this.logoutUseCase.execute(user.sub, user.sessionId, this.readRefreshCookie(req));
+    this.clearRefreshCookie(res);
   }
 
   @Post('logout/all')
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Cerrar todas las sesiones' })
-  async logoutAll(@CurrentUser() user: JwtPayload) {
+  @ApiOperation({ summary: 'Cerrar sesión en todos los dispositivos' })
+  async logoutAll(@CurrentUser() user: JwtPayload, @Res({ passthrough: true }) res: Response) {
     await this.logoutUseCase.revokeAllSessions(user.sub);
+    this.clearRefreshCookie(res);
   }
 
   @Get('me')
-  @UseGuards(JwtAuthGuard)
+  @SkipThrottle()
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Obtener usuario autenticado' })
+  @ApiOperation({ summary: 'Usuario autenticado con sus permisos efectivos' })
   async me(@CurrentUser() user: JwtPayload) {
-    const dbUser = await this.prisma.user.findFirst({
-      where: { id: user.sub },
-      include: {
-        tenant: { select: { id: true, name: true, slug: true, logoUrl: true } },
-        userRoles: {
-          include: {
-            role: {
-              include: {
-                rolePermissions: {
-                  include: { permission: { select: { slug: true } } },
-                },
-              },
-            },
-            branch: { select: { id: true, name: true } },
-          },
-        },
-      },
-    });
-
-    if (!dbUser) return null;
-
-    const permissions = [
-      ...new Set(
-        dbUser.userRoles.flatMap((ur) =>
-          ur.role.rolePermissions.map((rp: { permission: { slug: string } }) => rp.permission.slug),
-        ),
-      ),
-    ];
-
-    const primaryRole = dbUser.userRoles[0]?.role.slug ?? 'employee';
-    const roles = [...new Set(dbUser.userRoles.map((ur) => ur.role.slug))];
-
-    return {
-      id: dbUser.id,
-      email: dbUser.email,
-      firstName: dbUser.firstName,
-      lastName: dbUser.lastName,
-      avatarUrl: dbUser.avatarUrl,
-      status: dbUser.status,
-      mfaEnabled: dbUser.mfaEnabled,
-      language: dbUser.language,
-      timezone: dbUser.timezone,
-      lastLoginAt: dbUser.lastLoginAt,
-      tenantId: dbUser.tenantId,
-      role: primaryRole,
-      roles,
-      permissions,
-      tenant: dbUser.tenant,
-      userRoles: dbUser.userRoles.map((ur) => ({
-        roleId: ur.roleId,
-        roleName: ur.role.name,
-        roleSlug: ur.role.slug,
-        branchId: ur.branchId,
-        branchName: ur.branch?.name ?? null,
-      })),
-    };
+    return this.getProfileUseCase.execute(user.sub, user.tenantId, user.branchId ?? null);
   }
 
   @Post('mfa/setup')
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Iniciar configuración de MFA — obtener QR y secreto' })
   async setupMfa(@CurrentUser() user: JwtPayload) {
@@ -206,87 +166,75 @@ export class AuthController {
   }
 
   @Post('mfa/enable')
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Confirmar y habilitar MFA con código TOTP' })
-  async enableMfa(
-    @CurrentUser() user: JwtPayload,
-    @Body() dto: EnableMfaDto,
-  ) {
+  async enableMfa(@CurrentUser() user: JwtPayload, @Body() dto: EnableMfaDto) {
     await this.mfaUseCase.enableMfa(user.sub, user.tenantId, dto.code);
   }
 
   @Public()
   @Post('mfa/verify')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Verificar código MFA durante login' })
+  @Throttle({ default: { limit: 10, ttl: 5 * 60_000 } })
+  @ApiOperation({ summary: 'Verificar código MFA durante el login' })
   async verifyMfa(
     @Body() dto: VerifyMfaDto,
     @Ip() ip: string,
-    @Headers('user-agent') userAgent: string,
+    @Headers('user-agent') userAgent: string | undefined,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
     const tokens = await this.mfaUseCase.verifyMfaAndLogin(dto.mfaToken, dto.code, ip, userAgent ?? '');
-    res.cookie('refresh_token', tokens.refreshToken, {
-      httpOnly: true,
-      secure: !this.isDev,
-      sameSite: 'strict',
-      maxAge: 7 * 24 * 3600 * 1000,
-    });
-    return { accessToken: tokens.accessToken, expiresIn: tokens.expiresIn, tokenType: tokens.tokenType };
+    this.setRefreshCookie(req, res, tokens.refreshToken);
+    return this.publicTokens(tokens);
   }
 
   @Post('mfa/disable')
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Deshabilitar MFA (requiere código y contraseña)' })
-  async disableMfa(
-    @CurrentUser() user: JwtPayload,
-    @Body() dto: DisableMfaDto,
-  ) {
+  async disableMfa(@CurrentUser() user: JwtPayload, @Body() dto: DisableMfaDto) {
     await this.mfaUseCase.disableMfa(user.sub, user.tenantId, dto.code, dto.password);
   }
 
   @Public()
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 3, ttl: 3600 } })
-  @ApiOperation({ summary: 'Solicitar restablecimiento de contraseña' })
+  @Throttle({ default: { limit: 5, ttl: 60 * 60_000 } })
+  @ApiOperation({ summary: 'Solicitar enlace de restablecimiento de contraseña' })
   async forgotPassword(@Body() dto: ForgotPasswordDto) {
     await this.forgotPasswordUseCase.requestReset(dto.email);
-    return { message: 'Si el email existe, recibirás las instrucciones' };
+    return { message: 'Si el email está registrado, recibirás un enlace para restablecer tu contraseña' };
   }
 
   @Public()
   @Post('reset-password')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Restablecer contraseña con token' })
+  @Throttle({ default: { limit: 10, ttl: 60 * 60_000 } })
+  @ApiOperation({ summary: 'Restablecer contraseña con el token recibido por correo' })
   async resetPassword(@Body() dto: ResetPasswordDto) {
     await this.forgotPasswordUseCase.resetPassword(dto.token, dto.newPassword);
   }
 
   @Post('change-password')
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Cambiar contraseña (usuario autenticado)' })
+  @ApiOperation({ summary: 'Cambiar contraseña (cierra las demás sesiones)' })
   async changePassword(
     @CurrentUser() user: JwtPayload,
     @Body() dto: ChangePasswordDto,
+    @Res({ passthrough: true }) res: Response,
   ) {
     await this.changePasswordUseCase.execute(user.sub, dto.currentPassword, dto.newPassword);
+    this.clearRefreshCookie(res);
   }
 
   @Patch('profile')
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Actualizar perfil del usuario autenticado' })
-  async updateProfile(
-    @CurrentUser() user: JwtPayload,
-    @Body() dto: UpdateProfileDto,
-  ) {
+  async updateProfile(@CurrentUser() user: JwtPayload, @Body() dto: UpdateProfileDto) {
     await this.updateProfileUseCase.execute(user.sub, dto);
+    return this.getProfileUseCase.execute(user.sub, user.tenantId, user.branchId ?? null);
   }
 }

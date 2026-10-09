@@ -17,12 +17,12 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { IsEnum, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { PERMISSIONS } from '@inventario/shared';
-import { PurchaseUseCase, CreatePurchaseOrderDto, ReceiveItemsDto } from '../application/use-cases/purchase.use-case';
+import { PurchaseUseCase } from '../application/use-cases/purchase.use-case';
+import { CreatePurchaseOrderDto, ReceiveItemsDto } from '../application/dtos/purchase.dto';
 import { PrismaService } from '../../../database/prisma.service';
 import { StorageService } from '../../../storage/storage.service';
 import type { JwtPayload } from '@inventario/types';
@@ -38,7 +38,7 @@ class AttachPurchaseDocumentDto {
 
 @ApiTags('Compras')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('purchases')
 export class PurchasesController {
   constructor(

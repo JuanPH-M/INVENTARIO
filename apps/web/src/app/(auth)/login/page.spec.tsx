@@ -1,152 +1,113 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import LoginPage from './page';
 
-// Mock auth store
 const mockLogin = vi.fn();
 const mockVerifyMfa = vi.fn();
+const mockBootstrap = vi.fn(() => Promise.resolve(false));
 
 vi.mock('@/stores/auth.store', () => ({
   useAuthStore: () => ({
     login: mockLogin,
     verifyMfa: mockVerifyMfa,
+    bootstrap: mockBootstrap,
+    logoutReason: null,
   }),
 }));
-
-// Mock toast
-vi.mock('@/hooks/use-toast', () => ({
-  toast: vi.fn(),
-  useToast: vi.fn(() => ({ toasts: [], toast: vi.fn(), dismiss: vi.fn() })),
-}));
-
-// Mock next/navigation is already in setup.ts
 
 describe('LoginPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('renders email and password fields', () => {
+  it('renders email and password fields', async () => {
     render(<LoginPage />);
-    expect(screen.getByLabelText(/correo electrónico/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/contraseña/i)).toBeInTheDocument();
+    expect(await screen.findByLabelText(/correo electrónico/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^contraseña$/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /iniciar sesión/i })).toBeInTheDocument();
   });
 
-  it('shows validation error for invalid email', async () => {
-    const user = userEvent.setup();
-    const { container } = render(<LoginPage />);
-
-    await user.type(screen.getByLabelText(/correo electrónico/i), 'not-an-email');
-    // Submit the login form directly to trigger validation
-    fireEvent.submit(container.querySelector('form')!);
-
-    await waitFor(() => {
-      // Check for any validation error paragraph
-      const errorMessages = container.querySelectorAll('p.text-xs');
-      expect(errorMessages.length).toBeGreaterThan(0);
-    }, { timeout: 3000 });
-  });
-
-  it('shows validation error for empty password', async () => {
-    const user = userEvent.setup();
-    const { container } = render(<LoginPage />);
-
-    await user.type(screen.getByLabelText(/correo electrónico/i), 'valid@test.com');
-    fireEvent.submit(container.querySelector('form')!);
-
-    await waitFor(() => {
-      const errorMessages = container.querySelectorAll('p.text-xs');
-      expect(errorMessages.length).toBeGreaterThan(0);
-    }, { timeout: 3000 });
-  });
-
-  it('calls login with email and password on submit', async () => {
-    mockLogin.mockResolvedValue({ requiresMfa: false });
+  it('validates the email before calling the API', async () => {
     const user = userEvent.setup();
     render(<LoginPage />);
-
-    await user.type(screen.getByLabelText(/correo electrónico/i), 'admin@test.com');
-    await user.type(screen.getByLabelText(/contraseña/i), 'ValidPass123!');
+    await user.type(await screen.findByLabelText(/correo electrónico/i), 'not-an-email');
+    await user.type(screen.getByLabelText(/^contraseña$/i), 'x');
     await user.click(screen.getByRole('button', { name: /iniciar sesión/i }));
-
-    await waitFor(() => {
-      expect(mockLogin).toHaveBeenCalledWith('admin@test.com', 'ValidPass123!');
-    });
+    expect(await screen.findByText(/correo electrónico inválido/i)).toBeInTheDocument();
+    expect(mockLogin).not.toHaveBeenCalled();
   });
 
-  it('shows MFA step when login returns requiresMfa=true', async () => {
-    mockLogin.mockResolvedValue({ requiresMfa: true, tempToken: 'temp-123' });
+  it('requires a password', async () => {
     const user = userEvent.setup();
     render(<LoginPage />);
-
-    await user.type(screen.getByLabelText(/correo electrónico/i), 'admin@test.com');
-    await user.type(screen.getByLabelText(/contraseña/i), 'ValidPass123!');
+    await user.type(await screen.findByLabelText(/correo electrónico/i), 'valid@test.com');
     await user.click(screen.getByRole('button', { name: /iniciar sesión/i }));
+    expect(await screen.findByText(/la contraseña es requerida/i)).toBeInTheDocument();
+  });
 
-    await waitFor(() => {
-      expect(screen.getByText(/verificación en dos pasos/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/código de verificación/i)).toBeInTheDocument();
-    });
+  it('calls login with the credentials', async () => {
+    mockLogin.mockResolvedValueOnce({ requiresMfa: false });
+    const user = userEvent.setup();
+    render(<LoginPage />);
+    await user.type(await screen.findByLabelText(/correo electrónico/i), 'admin@test.com');
+    await user.type(screen.getByLabelText(/^contraseña$/i), 'Secret123');
+    await user.click(screen.getByRole('button', { name: /iniciar sesión/i }));
+    await waitFor(() => expect(mockLogin).toHaveBeenCalledWith('admin@test.com', 'Secret123', undefined));
+  });
+
+  it('shows the API error message inline', async () => {
+    mockLogin.mockRejectedValueOnce({ response: { data: { message: 'Credenciales inválidas' } } });
+    const user = userEvent.setup();
+    render(<LoginPage />);
+    await user.type(await screen.findByLabelText(/correo electrónico/i), 'admin@test.com');
+    await user.type(screen.getByLabelText(/^contraseña$/i), 'bad');
+    await user.click(screen.getByRole('button', { name: /iniciar sesión/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Credenciales inválidas');
+  });
+
+  it('asks for the company code when the email exists in several companies', async () => {
+    mockLogin.mockRejectedValueOnce({ response: { data: { message: 'Indica el código', code: 'TENANT_REQUIRED' } } });
+    const user = userEvent.setup();
+    render(<LoginPage />);
+    await user.type(await screen.findByLabelText(/correo electrónico/i), 'admin@test.com');
+    await user.type(screen.getByLabelText(/^contraseña$/i), 'Secret123');
+    await user.click(screen.getByRole('button', { name: /iniciar sesión/i }));
+    expect(await screen.findByLabelText(/código de la empresa/i)).toBeInTheDocument();
   });
 
   it('toggles password visibility', async () => {
     const user = userEvent.setup();
     render(<LoginPage />);
-
-    const passwordInput = screen.getByLabelText(/contraseña/i);
-    expect(passwordInput).toHaveAttribute('type', 'password');
-
-    // Find the toggle button (Eye icon button)
-    const toggleButton = screen.getByRole('button', { name: '' }); // icon-only button
-    await user.click(toggleButton);
-
-    expect(passwordInput).toHaveAttribute('type', 'text');
+    const input = await screen.findByLabelText(/^contraseña$/i);
+    expect(input).toHaveAttribute('type', 'password');
+    await user.click(screen.getByRole('button', { name: /mostrar contraseña/i }));
+    expect(input).toHaveAttribute('type', 'text');
   });
 
-  it('shows back button on MFA step that returns to login', async () => {
-    mockLogin.mockResolvedValue({ requiresMfa: true, tempToken: 'temp-123' });
+  it('switches to the MFA step and verifies the code with the MFA token', async () => {
+    mockLogin.mockResolvedValueOnce({ requiresMfa: true, mfaToken: 'mfa-123' });
+    mockVerifyMfa.mockResolvedValueOnce(undefined);
     const user = userEvent.setup();
     render(<LoginPage />);
-
-    await user.type(screen.getByLabelText(/correo electrónico/i), 'admin@test.com');
-    await user.type(screen.getByLabelText(/contraseña/i), 'ValidPass123!');
+    await user.type(await screen.findByLabelText(/correo electrónico/i), 'admin@test.com');
+    await user.type(screen.getByLabelText(/^contraseña$/i), 'Secret123');
     await user.click(screen.getByRole('button', { name: /iniciar sesión/i }));
 
-    const backButton = await screen.findByRole('button', { name: /volver/i });
-    expect(backButton).toBeInTheDocument();
-
-    await user.click(backButton);
-
-    await waitFor(() => {
-      // After clicking back, the MFA title should be gone
-      expect(screen.queryByText(/verificación en dos pasos/i)).not.toBeInTheDocument();
-    });
+    const code = await screen.findByLabelText(/código de verificación/i);
+    await user.type(code, '123456');
+    await user.click(screen.getByRole('button', { name: /verificar/i }));
+    await waitFor(() => expect(mockVerifyMfa).toHaveBeenCalledWith('123456', 'mfa-123'));
   });
 
-  it('calls verifyMfa with code and tempToken', async () => {
-    mockLogin.mockResolvedValue({ requiresMfa: true, tempToken: 'mfa-token' });
-    mockVerifyMfa.mockResolvedValue(undefined);
+  it('returns from the MFA step to the login form', async () => {
+    mockLogin.mockResolvedValueOnce({ requiresMfa: true, mfaToken: 'mfa-123' });
     const user = userEvent.setup();
-    const { container } = render(<LoginPage />);
-
-    // Go to MFA step
-    await user.type(screen.getByLabelText(/correo electrónico/i), 'admin@test.com');
-    await user.type(screen.getByLabelText(/contraseña/i), 'ValidPass123!');
+    render(<LoginPage />);
+    await user.type(await screen.findByLabelText(/correo electrónico/i), 'admin@test.com');
+    await user.type(screen.getByLabelText(/^contraseña$/i), 'Secret123');
     await user.click(screen.getByRole('button', { name: /iniciar sesión/i }));
-
-    // Wait for MFA step to appear
-    const codeInput = await screen.findByLabelText(/código de verificación/i);
-    await user.clear(codeInput);
-    await user.type(codeInput, '123456');
-
-    // The MFA form has the verify button — click it
-    await user.click(screen.getByRole('button', { name: /^verificar$/i }));
-
-    // verifyMfa may be called asynchronously
-    await waitFor(() => {
-      expect(mockVerifyMfa).toHaveBeenCalled();
-    }, { timeout: 5000 });
+    await user.click(await screen.findByRole('button', { name: /volver/i }));
+    expect(await screen.findByLabelText(/correo electrónico/i)).toBeInTheDocument();
   });
 });

@@ -4,9 +4,11 @@ import { StorageService } from './storage.service';
 import { LocalStorageProvider } from './providers/local.provider';
 import { S3StorageProvider } from './providers/s3.provider';
 import { STORAGE_PROVIDER } from './storage.interface';
+import { FilesController } from './files.controller';
 
 @Global()
 @Module({
+  controllers: [FilesController],
   providers: [
     {
       provide: STORAGE_PROVIDER,

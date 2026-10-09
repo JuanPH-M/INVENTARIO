@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
@@ -16,16 +16,16 @@ import storageConfig from './config/storage.config';
 import { PrismaModule } from './database/prisma.module';
 import { CacheModule } from './cache/cache.module';
 import { StorageModule } from './storage/storage.module';
+import { MailModule } from './mail/mail.module';
+import { AccessModule } from './common/access/access.module';
 
 // Common
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
-import { PermissionsGuard } from './common/guards/permissions.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 import { ResponseTransformInterceptor } from './common/interceptors/response-transform.interceptor';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
-import { HttpExceptionFilter } from './common/filters/http-exception.filter';
-import { PrismaExceptionFilter } from './common/filters/prisma-exception.filter';
+import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 
 // Modules
 import { AuthModule } from './modules/auth/auth.module';
@@ -55,6 +55,7 @@ import { ReportsModule } from './modules/reports/reports.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { AiModule } from './modules/ai/ai.module';
 import { BackupModule } from './modules/backup/backup.module';
+import { JobsModule } from './modules/jobs/jobs.module';
 
 // Health check
 import { HealthController } from './health.controller';
@@ -71,17 +72,12 @@ import { HealthController } from './health.controller';
       ],
     }),
 
-    // Rate limiting
+    // Rate limiting (ttl en milisegundos — @nestjs/throttler v6)
     ThrottlerModule.forRoot([
       {
-        name: 'short',
-        ttl: 1000,
-        limit: 10,
-      },
-      {
-        name: 'medium',
-        ttl: 60000,
-        limit: 200,
+        name: 'default',
+        ttl: 60_000,
+        limit: Number(process.env['RATE_LIMIT_MAX'] ?? 300),
       },
     ]),
 
@@ -100,6 +96,8 @@ import { HealthController } from './health.controller';
     PrismaModule,
     CacheModule,
     StorageModule,
+    MailModule,
+    AccessModule,
 
     // Feature modules
     AuthModule,
@@ -129,17 +127,27 @@ import { HealthController } from './health.controller';
     AnalyticsModule,
     AiModule,
     BackupModule,
+    JobsModule,
   ],
   controllers: [HealthController],
   providers: [
-    // Global filters
+    // Global guards — se ejecutan en este orden: autenticación, rate limit, roles
     {
-      provide: APP_FILTER,
-      useClass: PrismaExceptionFilter,
+      provide: APP_GUARD,
+      useClass: JwtAuthGuard,
     },
     {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: RolesGuard,
+    },
+    // Filtro global de excepciones (forma de error uniforme)
+    {
       provide: APP_FILTER,
-      useClass: HttpExceptionFilter,
+      useClass: GlobalExceptionFilter,
     },
     // Global interceptors
     {

@@ -17,7 +17,7 @@ describe('Badge', () => {
   it('applies success variant classes', () => {
     render(<Badge variant="success" data-testid="badge">OK</Badge>);
     const badge = screen.getByTestId('badge');
-    expect(badge.className).toContain('bg-green-100');
+    expect(badge.className).toContain('bg-success/10');
   });
 
   it('applies destructive variant classes', () => {
@@ -29,7 +29,7 @@ describe('Badge', () => {
   it('applies warning variant classes', () => {
     render(<Badge variant="warning" data-testid="badge">Alerta</Badge>);
     const badge = screen.getByTestId('badge');
-    expect(badge.className).toContain('bg-yellow-100');
+    expect(badge.className).toContain('bg-warning/15');
   });
 
   it('merges custom className', () => {

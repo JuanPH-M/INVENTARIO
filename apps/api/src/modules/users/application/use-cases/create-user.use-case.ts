@@ -6,12 +6,17 @@ import {
 import * as argon2 from 'argon2';
 import { PrismaService } from '../../../../database/prisma.service';
 import type { CreateUserDto } from '../dtos/user.dto';
+import { assertAssignableRole, assertBranchOfTenant } from '../role-policy';
 
 @Injectable()
 export class CreateUserUseCase {
   constructor(private readonly prisma: PrismaService) {}
 
-  async execute(dto: CreateUserDto, tenantId: string, createdById: string) {
+  async execute(dto: CreateUserDto, tenantId: string, createdById: string, requesterRoles: string[] = []) {
+    // Valida el rol antes de crear nada: evita asignar roles privilegiados o de otra empresa
+    await assertAssignableRole(this.prisma, dto.roleId, tenantId, requesterRoles);
+    await assertBranchOfTenant(this.prisma, dto.branchId, tenantId);
+
     const existing = await this.prisma.user.findFirst({
       where: { tenantId, email: dto.email.toLowerCase() },
     });
@@ -56,6 +61,7 @@ export class CreateUserUseCase {
       data: {
         userId: user.id,
         roleId: dto.roleId,
+        branchId: dto.branchId ?? null,
         assignedBy: createdById,
       },
     });

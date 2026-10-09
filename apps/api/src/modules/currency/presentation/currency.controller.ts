@@ -11,7 +11,6 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { IsDateString, IsNotEmpty, IsNumber, IsString, Min } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
@@ -19,6 +18,12 @@ import { PrismaService } from '../../../database/prisma.service';
 import { CacheService } from '../../../cache/cache.service';
 import { PERMISSIONS } from '@inventario/shared';
 import type { JwtPayload } from '@inventario/types';
+
+class ConvertAmountDto {
+  @ApiProperty() @IsNumber() @Min(0) @Type(() => Number) amount!: number;
+  @ApiProperty({ example: 'USD' }) @IsString() @IsNotEmpty() fromCode!: string;
+  @ApiProperty({ example: 'COP' }) @IsString() @IsNotEmpty() toCode!: string;
+}
 
 class SetExchangeRateDto {
   @ApiProperty({ example: 'USD' }) @IsString() @IsNotEmpty() fromCurrencyCode!: string;
@@ -29,7 +34,7 @@ class SetExchangeRateDto {
 
 @ApiTags('Divisas')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('currency')
 export class CurrencyController {
   constructor(
@@ -106,7 +111,7 @@ export class CurrencyController {
   @RequirePermissions(PERMISSIONS.CURRENCY_READ)
   @ApiOperation({ summary: 'Convertir monto entre divisas' })
   async convert(
-    @Body() body: { amount: number; fromCode: string; toCode: string },
+    @Body() body: ConvertAmountDto,
     @CurrentUser() user: JwtPayload,
   ) {
     const rate = await this.prisma.exchangeRate.findFirst({

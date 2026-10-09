@@ -4,6 +4,7 @@ import {
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../../database/prisma.service';
 import { paginate } from '../../../../common/utils/pagination.util';
 
@@ -108,13 +109,18 @@ export class CashRegisterUseCase {
     performedById: string,
     referenceType?: string,
     referenceId?: string,
+    tx?: Prisma.TransactionClient,
   ) {
-    const session = await this.prisma.cashRegisterSession.findFirst({
+    // Permite participar en la transacción del llamador (p. ej. una venta)
+    const db = tx ?? this.prisma;
+    if (!(amount > 0)) throw new BadRequestException('El monto debe ser mayor a cero');
+
+    const session = await db.cashRegisterSession.findFirst({
       where: { id: sessionId, tenantId, status: 'open' },
     });
     if (!session) throw new NotFoundException('Sesión de caja no encontrada o cerrada');
 
-    const movement = await this.prisma.cashRegisterMovement.create({
+    const movement = await db.cashRegisterMovement.create({
       data: {
         sessionId,
         type,
@@ -130,7 +136,7 @@ export class CashRegisterUseCase {
     const isIncome = incomeTypes.includes(type);
     const delta = isIncome ? amount : -amount;
 
-    await this.prisma.cashRegisterSession.update({
+    await db.cashRegisterSession.update({
       where: { id: sessionId },
       data: {
         expectedClosingAmount: {

@@ -64,7 +64,6 @@ docker-compose.override.yml
 # IDE
 .vscode/*
 !.vscode/extensions.json
-!.vscode/settings.json
 .idea
 *.suo
 *.ntvs*
@@ -84,3 +83,8 @@ apps/api/uploads/*
 nginx/ssl/*.pem
 nginx/ssl/*.key
 nginx/ssl/*.crt
+
+# Datos locales de la API
+apps/api/backups/
+apps/api/coverage/
+.venv/

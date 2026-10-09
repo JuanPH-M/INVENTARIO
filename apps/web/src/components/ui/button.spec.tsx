@@ -36,7 +36,7 @@ describe('Button', () => {
 
   it('applies ghost variant classes', () => {
     render(<Button variant="ghost" data-testid="btn">Ghost</Button>);
-    expect(screen.getByTestId('btn').className).toContain('hover:bg-accent');
+    expect(screen.getByTestId('btn').className).toContain('hover:bg-muted');
   });
 
   it('applies sm size classes', () => {
@@ -46,7 +46,7 @@ describe('Button', () => {
 
   it('applies icon size classes', () => {
     render(<Button size="icon" data-testid="btn">+</Button>);
-    expect(screen.getByTestId('btn').className).toContain('h-10 w-10');
+    expect(screen.getByTestId('btn').className).toContain('h-9 w-9');
   });
 
   it('renders as child element with asChild=true', () => {

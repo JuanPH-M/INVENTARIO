@@ -9,7 +9,6 @@ import {
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
@@ -38,7 +37,7 @@ class UpdateSubscriptionDto extends PartialType(CreateSubscriptionDto) {}
 
 @ApiTags('Suscripciones (Externas)')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('subscriptions')
 export class SubscriptionsController {
   constructor(private readonly prisma: PrismaService) {}

@@ -17,6 +17,18 @@ export class InventoryUseCase {
     private readonly cache: CacheService,
   ) {}
 
+  /** Ejecuta la operación y limpia las cachés de stock afectadas. */
+  private async withInvalidation<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+    const result = await fn();
+    await Promise.all([
+      this.cache.invalidatePattern(`INV_STOCK:${tenantId}:*`),
+      this.cache.invalidatePattern(`INV_LOW_STOCK:${tenantId}:*`),
+      this.cache.invalidatePattern(`INV_VALUATION:${tenantId}:*`),
+      this.cache.invalidatePattern(`PROD_LIST:${tenantId}:*`),
+    ]);
+    return result;
+  }
+
   async getStock(tenantId: string, branchId?: string, productId?: string) {
     const key = `INV_STOCK:${tenantId}:${branchId ?? 'all'}:${productId ?? 'all'}`;
     return this.cache.getOrSet(
@@ -78,7 +90,7 @@ export class InventoryUseCase {
     const isOut = OUT_MOVEMENT_TYPES.includes(dto.type);
     const direction = isOut ? -1 : 1;
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.withInvalidation(tenantId, () => this.prisma.$transaction(async (tx) => {
       let stock = await tx.inventoryStock.findFirst({
         where: { tenantId, productId: dto.productId, branchId: dto.branchId },
       });
@@ -105,11 +117,11 @@ export class InventoryUseCase {
 
       // Atomic update — prevents race conditions by checking quantity in the WHERE clause
       if (isOut) {
-        const result = await tx.inventoryStock.updateMany({
-          where: { id: stock.id, quantity: { gte: dto.quantity } },
-          data: { quantity: { decrement: dto.quantity } },
-        });
-        if (result.count === 0) {
+        const result = await tx.$executeRaw`
+          UPDATE inventory_stock
+             SET quantity = quantity - ${dto.quantity}, updated_at = NOW()
+           WHERE id = ${stock.id} AND quantity - reserved >= ${dto.quantity}`;
+        if (result === 0) {
           throw new BadRequestException(
             'Stock insuficiente o modificado concurrentemente. Por favor, reintente la operación.',
           );
@@ -138,7 +150,7 @@ export class InventoryUseCase {
           performedById,
         },
       });
-    });
+    }));
   }
 
   async transferStock(dto: TransferStockDto, tenantId: string, performedById: string) {
@@ -156,7 +168,7 @@ export class InventoryUseCase {
     if (!toBranch) throw new NotFoundException('Sucursal de destino no encontrada');
     if (!product) throw new NotFoundException('Producto no encontrado');
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.withInvalidation(tenantId, () => this.prisma.$transaction(async (tx) => {
       const fromStock = await tx.inventoryStock.findFirst({
         where: { tenantId, productId: dto.productId, branchId: dto.fromBranchId },
       });
@@ -179,11 +191,11 @@ export class InventoryUseCase {
       }
 
       // Atomic decrement of source stock — prevents race condition
-      const fromResult = await tx.inventoryStock.updateMany({
-        where: { id: fromStock.id, quantity: { gte: dto.quantity } },
-        data: { quantity: { decrement: dto.quantity } },
-      });
-      if (fromResult.count === 0) {
+      const fromResult = await tx.$executeRaw`
+        UPDATE inventory_stock
+           SET quantity = quantity - ${dto.quantity}, updated_at = NOW()
+         WHERE id = ${fromStock.id} AND quantity - reserved >= ${dto.quantity}`;
+      if (fromResult === 0) {
         throw new BadRequestException(
           'Stock insuficiente o modificado concurrentemente. Por favor, reintente la operación.',
         );
@@ -241,7 +253,7 @@ export class InventoryUseCase {
           performedById,
         },
       });
-    });
+    }));
   }
 
   async physicalCount(
@@ -260,7 +272,7 @@ export class InventoryUseCase {
 
     const productIds = items.map((i) => i.productId);
 
-    return await this.prisma.$transaction(async (tx) => {
+    return this.withInvalidation(tenantId, () => this.prisma.$transaction(async (tx) => {
       const adjustments: { productId: string; before: number; after: number; diff: number }[] = [];
 
       // Read stocks INSIDE the transaction to avoid stale data
@@ -321,7 +333,7 @@ export class InventoryUseCase {
       });
 
       return { adjustments, count: adjustments.length };
-    });
+    }));
   }
 
   async getMovements(tenantId: string, query: GetMovementsQueryDto) {

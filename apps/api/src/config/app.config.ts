@@ -10,5 +10,6 @@ export default registerAs('app', () => ({
   isTest: process.env['NODE_ENV'] === 'test',
   workerMode: process.env['WORKER_MODE'] === 'true',
   mfaAppName: process.env['MFA_APP_NAME'] ?? 'Inventario SaaS',
+  encryptionKey: process.env['ENCRYPTION_KEY'] ?? '',
   superAdminEmail: process.env['SUPER_ADMIN_EMAIL'] ?? 'admin@inventario.dev',
 }));

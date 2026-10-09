@@ -30,6 +30,7 @@ export class ProductsUseCase {
     }
 
     await this.checkProductLimit(tenantId);
+    await this.assertRelations(tenantId, dto.categoryId, dto.supplierId);
 
     const product = await this.prisma.product.create({
       data: {
@@ -72,6 +73,7 @@ export class ProductsUseCase {
       },
     });
 
+    await this.invalidateLists(tenantId);
     return product;
   }
 
@@ -142,6 +144,7 @@ export class ProductsUseCase {
       where: { id: productId, tenantId, deletedAt: null },
     });
     if (!product) throw new NotFoundException('Producto no encontrado');
+    await this.assertRelations(tenantId, dto.categoryId, dto.supplierId);
 
     const changed: Record<string, unknown> = {};
     if (dto.salePrice !== undefined && dto.salePrice !== Number(product.salePrice)) {
@@ -177,6 +180,7 @@ export class ProductsUseCase {
       });
     }
 
+    await this.invalidateLists(tenantId);
     return updated;
   }
 
@@ -203,6 +207,7 @@ export class ProductsUseCase {
       where: { id: productId },
       data: { deletedAt: new Date(), status: 'discontinued' },
     });
+    await this.invalidateLists(tenantId);
   }
 
   async generateQrCode(productId: string, tenantId: string): Promise<string> {
@@ -322,6 +327,26 @@ export class ProductsUseCase {
     ].sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
 
     return timeline;
+  }
+
+  private async invalidateLists(tenantId: string): Promise<void> {
+    await Promise.all([
+      this.cache.invalidatePattern(`PROD_LIST:${tenantId}:*`),
+      this.cache.invalidatePattern(`INV_STOCK:${tenantId}:*`),
+      this.cache.invalidatePattern(`INV_LOW_STOCK:${tenantId}:*`),
+    ]);
+  }
+
+  /** Impide asociar categorías o proveedores de otra empresa. */
+  private async assertRelations(tenantId: string, categoryId?: string | null, supplierId?: string | null) {
+    if (categoryId) {
+      const ok = await this.prisma.category.count({ where: { id: categoryId, tenantId, deletedAt: null } });
+      if (!ok) throw new BadRequestException('La categoría no existe');
+    }
+    if (supplierId) {
+      const ok = await this.prisma.supplier.count({ where: { id: supplierId, tenantId, deletedAt: null } });
+      if (!ok) throw new BadRequestException('El proveedor no existe');
+    }
   }
 
   private async checkProductLimit(tenantId: string): Promise<void> {

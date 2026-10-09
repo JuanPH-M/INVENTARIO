@@ -17,6 +17,9 @@ export interface StorageProvider {
   getSignedUrl(key: string, expiresInSeconds?: number): Promise<string>;
 
   exists(key: string): Promise<boolean>;
+
+  /** Lectura en streaming (para servir archivos a través de la API). */
+  read(key: string): Promise<{ stream: NodeJS.ReadableStream; contentType?: string; size?: number }>;
 }
 
 export const STORAGE_PROVIDER = 'STORAGE_PROVIDER';

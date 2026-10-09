@@ -8,7 +8,6 @@ import {
   IsString, IsUUID, MaxLength,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
@@ -37,7 +36,7 @@ class UpdateEventDto extends PartialType(CreateEventDto) {}
 
 @ApiTags('Calendario')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('calendar')
 export class CalendarController {
   constructor(private readonly prisma: PrismaService) {}

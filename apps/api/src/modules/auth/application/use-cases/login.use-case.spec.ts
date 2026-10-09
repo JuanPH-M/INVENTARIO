@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { UnauthorizedException, BadRequestException } from '@nestjs/common';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as argon2 from 'argon2';
@@ -24,7 +24,7 @@ function makeUser(overrides: Record<string, unknown> = {}) {
     failedLoginAttempts: 0,
     mfaEnabled: false,
     mfaSecret: null,
-    tenant: { id: TENANT_ID, status: 'active', planId: 'plan-1' },
+    tenant: { id: TENANT_ID, status: 'active', planId: 'plan-1', deletedAt: null },
     userRoles: [{ role: { slug: 'admin_general' } }],
     ...overrides,
   };
@@ -32,204 +32,164 @@ function makeUser(overrides: Record<string, unknown> = {}) {
 
 describe('LoginUseCase', () => {
   let useCase: LoginUseCase;
-  let prisma: jest.Mocked<PrismaService>;
-  let jwtService: jest.Mocked<JwtService>;
-  let cacheService: jest.Mocked<CacheService>;
-  let configService: jest.Mocked<ConfigService>;
+  let prisma: { user: { findMany: jest.Mock; update: jest.Mock }; refreshToken: { create: jest.Mock } };
+  let jwtService: { sign: jest.Mock };
+  let cacheService: { set: jest.Mock; increment: jest.Mock; expire: jest.Mock };
+
+  const dto = { email: 'admin@test.com', password: 'Secret123' };
 
   beforeEach(async () => {
+    prisma = {
+      user: { findMany: jest.fn(), update: jest.fn() },
+      refreshToken: { create: jest.fn() },
+    };
+    jwtService = { sign: jest.fn().mockReturnValue('mock-jwt-token') };
+    cacheService = { set: jest.fn(), increment: jest.fn(), expire: jest.fn() };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         LoginUseCase,
-        {
-          provide: PrismaService,
-          useValue: {
-            user: {
-              findFirst: jest.fn(),
-              update: jest.fn(),
-            },
-            refreshToken: {
-              create: jest.fn(),
-            },
-          },
-        },
-        {
-          provide: JwtService,
-          useValue: { sign: jest.fn().mockReturnValue('mock-jwt-token') },
-        },
-        {
-          provide: CacheService,
-          useValue: {
-            set: jest.fn(),
-            increment: jest.fn(),
-            expire: jest.fn(),
-          },
-        },
+        { provide: PrismaService, useValue: prisma },
+        { provide: JwtService, useValue: jwtService },
+        { provide: CacheService, useValue: cacheService },
         {
           provide: ConfigService,
           useValue: {
-            get: jest.fn((key: string) => {
-              const map: Record<string, string> = {
-                'jwt.expiresIn': '15m',
-                'jwt.refreshTokenExpiresIn': '7d',
-                'jwt.privateKey': '',
-              };
-              return map[key] ?? null;
-            }),
+            get: jest.fn((key: string) =>
+              ({ 'jwt.expiresIn': '15m', 'jwt.refreshTokenExpiresIn': '7d' } as Record<string, string>)[key],
+            ),
           },
         },
       ],
     }).compile();
 
     useCase = module.get(LoginUseCase);
-    prisma = module.get(PrismaService) as jest.Mocked<PrismaService>;
-    jwtService = module.get(JwtService) as jest.Mocked<JwtService>;
-    cacheService = module.get(CacheService) as jest.Mocked<CacheService>;
-    configService = module.get(ConfigService) as jest.Mocked<ConfigService>;
+    jest.clearAllMocks();
   });
 
   describe('execute — happy path', () => {
-    it('returns tokens on valid credentials', async () => {
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue(makeUser());
-      (mockArgon2.verify as jest.Mock).mockResolvedValue(true);
-      (prisma.user.update as jest.Mock).mockResolvedValue({});
-      (prisma.refreshToken.create as jest.Mock).mockResolvedValue({});
+    it('returns tokens on valid credentials and stores a hashed refresh token', async () => {
+      prisma.user.findMany.mockResolvedValue([makeUser()]);
+      mockArgon2.verify.mockResolvedValue(true);
 
-      const result = await useCase.execute(
-        { email: 'admin@test.com', password: 'ValidPass123!' },
-        '127.0.0.1',
-        'Jest/Test',
-      );
+      const result = await useCase.execute(dto, '127.0.0.1', 'jest');
 
       expect(result.type).toBe('success');
-      if (result.type === 'success') {
-        expect(result.data.accessToken).toBe('mock-jwt-token');
-        expect(result.data.tokenType).toBe('Bearer');
-      }
+      if (result.type !== 'success') return;
+      expect(result.data.accessToken).toBe('mock-jwt-token');
+      expect(result.data.refreshToken).toHaveLength(128);
+      expect(result.data.expiresIn).toBe(900);
+
+      const stored = prisma.refreshToken.create.mock.calls[0][0].data;
+      expect(stored.tokenHash).not.toBe(result.data.refreshToken);
+      expect(stored.deviceInfo.sessionId).toBeDefined();
+      expect(jwtService.sign).toHaveBeenCalledWith(
+        expect.objectContaining({ sub: USER_ID, tenantId: TENANT_ID, email: 'admin@test.com', roles: ['admin_general'] }),
+        expect.anything(),
+      );
+    });
+
+    it('resets failed attempts on success', async () => {
+      prisma.user.findMany.mockResolvedValue([makeUser({ failedLoginAttempts: 3 })]);
+      mockArgon2.verify.mockResolvedValue(true);
+
+      await useCase.execute(dto, '127.0.0.1', 'jest');
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ failedLoginAttempts: 0 }) }),
+      );
     });
 
     it('requires MFA when mfaEnabled is true', async () => {
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue(
-        makeUser({ mfaEnabled: true, mfaSecret: 'encrypted-secret' }),
-      );
-      (mockArgon2.verify as jest.Mock).mockResolvedValue(true);
-      (prisma.user.update as jest.Mock).mockResolvedValue({});
-      (cacheService.set as jest.Mock).mockResolvedValue(undefined);
+      prisma.user.findMany.mockResolvedValue([makeUser({ mfaEnabled: true, mfaSecret: 'enc' })]);
+      mockArgon2.verify.mockResolvedValue(true);
 
-      const result = await useCase.execute(
-        { email: 'admin@test.com', password: 'ValidPass123!' },
-        '127.0.0.1',
-        'Jest/Test',
-      );
-
+      const result = await useCase.execute(dto, '127.0.0.1', 'jest');
       expect(result.type).toBe('mfa_required');
-      if (result.type === 'mfa_required') {
-        expect(result.mfaToken).toBeDefined();
-      }
+      expect(cacheService.set).toHaveBeenCalledWith(
+        expect.stringMatching(/^mfa:pending:/),
+        { userId: USER_ID, tenantId: TENANT_ID },
+        300,
+      );
+      expect(prisma.refreshToken.create).not.toHaveBeenCalled();
+    });
+
+    it('filters by tenant slug when provided', async () => {
+      prisma.user.findMany.mockResolvedValue([makeUser()]);
+      mockArgon2.verify.mockResolvedValue(true);
+
+      await useCase.execute({ ...dto, tenantSlug: 'acme' }, '127.0.0.1', 'jest');
+      expect(prisma.user.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ tenant: { slug: 'acme' }, deletedAt: null }) }),
+      );
+    });
+
+    it('allows login once a temporary lock has expired', async () => {
+      prisma.user.findMany.mockResolvedValue([
+        makeUser({ status: 'locked', lockedUntil: new Date(Date.now() - 1000) }),
+      ]);
+      mockArgon2.verify.mockResolvedValue(true);
+
+      const result = await useCase.execute(dto, '127.0.0.1', 'jest');
+      expect(result.type).toBe('success');
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'active', lockedUntil: null }) }),
+      );
     });
   });
 
   describe('execute — errors', () => {
-    it('throws UnauthorizedException for unknown email', async () => {
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue(null);
-      (cacheService.increment as jest.Mock).mockResolvedValue(1);
-      (cacheService.expire as jest.Mock).mockResolvedValue(undefined);
-
-      await expect(
-        useCase.execute({ email: 'nobody@test.com', password: 'x' }, '127.0.0.1', 'ua'),
-      ).rejects.toThrow(UnauthorizedException);
+    it('asks for the company when the email exists in several tenants', async () => {
+      prisma.user.findMany.mockResolvedValue([makeUser(), makeUser({ id: 'other' })]);
+      await expect(useCase.execute(dto, '127.0.0.1', 'jest')).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('throws UnauthorizedException when tenant is suspended', async () => {
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue(
-        makeUser({ tenant: { id: TENANT_ID, status: 'suspended', planId: 'plan-1' } }),
-      );
-
-      await expect(
-        useCase.execute({ email: 'admin@test.com', password: 'x' }, '127.0.0.1', 'ua'),
-      ).rejects.toThrow('Esta empresa está suspendida');
+    it('throws a generic error for unknown email and tracks the attempt', async () => {
+      prisma.user.findMany.mockResolvedValue([]);
+      await expect(useCase.execute(dto, '127.0.0.1', 'jest')).rejects.toThrow('Credenciales inválidas');
+      expect(cacheService.increment).toHaveBeenCalled();
     });
 
-    it('throws UnauthorizedException when account is locked and lock is still valid', async () => {
-      const lockedUntil = new Date(Date.now() + 10 * 60 * 1000);
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue(
-        makeUser({ status: 'locked', lockedUntil }),
-      );
-
-      await expect(
-        useCase.execute({ email: 'admin@test.com', password: 'x' }, '127.0.0.1', 'ua'),
-      ).rejects.toThrow(/bloqueada/);
+    it('rejects suspended tenants', async () => {
+      prisma.user.findMany.mockResolvedValue([makeUser({ tenant: { id: TENANT_ID, status: 'suspended', deletedAt: null } })]);
+      await expect(useCase.execute(dto, '127.0.0.1', 'jest')).rejects.toBeInstanceOf(UnauthorizedException);
     });
 
-    it('throws UnauthorizedException when account is suspended', async () => {
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue(makeUser({ status: 'suspended' }));
-
-      await expect(
-        useCase.execute({ email: 'admin@test.com', password: 'x' }, '127.0.0.1', 'ua'),
-      ).rejects.toThrow('Cuenta suspendida');
+    it('rejects accounts with an active temporary lock', async () => {
+      prisma.user.findMany.mockResolvedValue([
+        makeUser({ status: 'locked', lockedUntil: new Date(Date.now() + 10 * 60_000) }),
+      ]);
+      await expect(useCase.execute(dto, '127.0.0.1', 'jest')).rejects.toThrow(/bloqueada temporalmente/);
+      expect(mockArgon2.verify).not.toHaveBeenCalled();
     });
 
-    it('throws UnauthorizedException and increments failed attempts on wrong password', async () => {
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue(makeUser());
-      (mockArgon2.verify as jest.Mock).mockResolvedValue(false);
-      (cacheService.increment as jest.Mock).mockResolvedValue(1);
-      (cacheService.expire as jest.Mock).mockResolvedValue(undefined);
-      (prisma.user.update as jest.Mock).mockResolvedValue({});
+    it('rejects accounts locked manually by an administrator', async () => {
+      prisma.user.findMany.mockResolvedValue([makeUser({ status: 'locked', lockedUntil: null })]);
+      await expect(useCase.execute(dto, '127.0.0.1', 'jest')).rejects.toThrow(/Contacta al administrador/);
+    });
 
-      await expect(
-        useCase.execute({ email: 'admin@test.com', password: 'wrong' }, '127.0.0.1', 'ua'),
-      ).rejects.toThrow(UnauthorizedException);
+    it.each(['suspended', 'inactive'])('rejects %s accounts', async (status) => {
+      prisma.user.findMany.mockResolvedValue([makeUser({ status })]);
+      await expect(useCase.execute(dto, '127.0.0.1', 'jest')).rejects.toBeInstanceOf(UnauthorizedException);
+    });
 
+    it('increments failed attempts on wrong password without revealing remaining attempts', async () => {
+      prisma.user.findMany.mockResolvedValue([makeUser({ failedLoginAttempts: 1 })]);
+      mockArgon2.verify.mockResolvedValue(false);
+
+      await expect(useCase.execute(dto, '127.0.0.1', 'jest')).rejects.toThrow('Credenciales inválidas');
       expect(prisma.user.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ failedLoginAttempts: { increment: 1 } }),
-        }),
+        expect.objectContaining({ data: { failedLoginAttempts: 2 } }),
       );
     });
 
-    it('locks account after 5 failed attempts', async () => {
-      (prisma.user.findFirst as jest.Mock).mockResolvedValue(
-        makeUser({ failedLoginAttempts: 4 }),
-      );
-      (mockArgon2.verify as jest.Mock).mockResolvedValue(false);
-      (cacheService.increment as jest.Mock).mockResolvedValue(5);
-      (cacheService.expire as jest.Mock).mockResolvedValue(undefined);
-      (prisma.user.update as jest.Mock).mockResolvedValue({});
+    it('locks the account after 5 failed attempts', async () => {
+      prisma.user.findMany.mockResolvedValue([makeUser({ failedLoginAttempts: 4 })]);
+      mockArgon2.verify.mockResolvedValue(false);
 
-      await expect(
-        useCase.execute({ email: 'admin@test.com', password: 'wrong' }, '127.0.0.1', 'ua'),
-      ).rejects.toThrow(UnauthorizedException);
-
-      expect(prisma.user.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ status: 'locked', lockedUntil: expect.any(Date) }),
-        }),
-      );
-    });
-  });
-
-  describe('generateTokens', () => {
-    it('creates a refresh token record in the database', async () => {
-      (prisma.refreshToken.create as jest.Mock).mockResolvedValue({});
-
-      await useCase.generateTokens(USER_ID, TENANT_ID, null, ['admin'], 'ua', '127.0.0.1');
-
-      expect(prisma.refreshToken.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ userId: USER_ID, tokenHash: expect.any(String) }),
-        }),
-      );
-    });
-
-    it('signs the JWT with the correct payload', async () => {
-      (prisma.refreshToken.create as jest.Mock).mockResolvedValue({});
-
-      await useCase.generateTokens(USER_ID, TENANT_ID, 'branch-1', ['vendor'], 'ua', '127.0.0.1');
-
-      expect(jwtService.sign).toHaveBeenCalledWith(
-        expect.objectContaining({ sub: USER_ID, tenantId: TENANT_ID, branchId: 'branch-1' }),
-        expect.any(Object),
-      );
+      await expect(useCase.execute(dto, '127.0.0.1', 'jest')).rejects.toThrow(/bloqueada por 15 minutos/);
+      const data = prisma.user.update.mock.calls[0][0].data;
+      expect(data.status).toBe('locked');
+      expect(data.lockedUntil).toBeInstanceOf(Date);
     });
   });
 });

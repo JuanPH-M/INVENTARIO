@@ -4,38 +4,40 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../../database/prisma.service';
+import { CacheService } from '../../../../cache/cache.service';
 import { parsePaginationParams, paginate } from '../../../../common/utils/pagination.util';
 import type { Prisma } from '@prisma/client';
 
-export interface CreatePurchaseOrderDto {
-  branchId: string;
-  supplierId: string;
-  clientId?: string;
-  currencyId?: string;
-  expectedDate?: string;
-  paymentTerms?: number;
-  notes?: string;
-  items: Array<{
-    productId: string;
-    quantityOrdered: number;
-    unitCost: number;
-    taxRate?: number;
-    discountRate?: number;
-    location?: string;
-    notes?: string;
-  }>;
-}
+const round2 = (v: number): number => Math.round((v + Number.EPSILON) * 100) / 100;
 
-export interface ReceiveItemsDto {
-  items: Array<{ purchaseOrderItemId: string; quantityReceived: number; location?: string }>;
-  notes?: string;
-}
+export type { CreatePurchaseOrderDto, ReceiveItemsDto } from '../dtos/purchase.dto';
+import type { CreatePurchaseOrderDto, ReceiveItemsDto } from '../dtos/purchase.dto';
 
 @Injectable()
 export class PurchaseUseCase {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cache: CacheService,
+  ) {}
 
   async create(dto: CreatePurchaseOrderDto, tenantId: string, createdById: string) {
+    if (!dto.items?.length) throw new BadRequestException('La orden debe tener al menos un producto');
+
+    // Todas las referencias deben pertenecer a la misma empresa
+    const productIds = [...new Set(dto.items.map((i) => i.productId))];
+    const [branch, supplier, productCount] = await Promise.all([
+      this.prisma.branch.count({ where: { id: dto.branchId, tenantId, deletedAt: null } }),
+      this.prisma.supplier.count({ where: { id: dto.supplierId, tenantId, deletedAt: null } }),
+      this.prisma.product.count({ where: { id: { in: productIds }, tenantId, deletedAt: null } }),
+    ]);
+    if (!branch) throw new NotFoundException('Sucursal no encontrada');
+    if (!supplier) throw new NotFoundException('Proveedor no encontrado');
+    if (productCount !== productIds.length) throw new NotFoundException('Uno o más productos no existen');
+    if (dto.clientId) {
+      const client = await this.prisma.client.count({ where: { id: dto.clientId, tenantId, deletedAt: null } });
+      if (!client) throw new NotFoundException('Cliente no encontrado');
+    }
+
     const currencyId = dto.currencyId ?? (
       await this.prisma.tenantCurrency.findFirst({
         where: { tenantId, isDefault: true },
@@ -44,21 +46,22 @@ export class PurchaseUseCase {
 
     if (!currencyId) throw new BadRequestException('No hay divisa configurada');
 
-    let subtotal = 0, taxAmount = 0;
+    let subtotal = 0;
+    let taxAmount = 0;
     const itemsData = dto.items.map((item) => {
-      const gross = item.quantityOrdered * item.unitCost;
-      const discount = gross * (item.discountRate ?? 0);
-      const net = gross - discount;
-      const tax = net * (item.taxRate ?? 0);
-      subtotal += net;
-      taxAmount += tax;
+      const gross = round2(item.quantityOrdered * item.unitCost);
+      const discount = round2(gross * (item.discountRate ?? 0));
+      const net = round2(gross - discount);
+      const tax = round2(net * (item.taxRate ?? 0));
+      subtotal = round2(subtotal + net);
+      taxAmount = round2(taxAmount + tax);
       return {
         productId: item.productId,
         quantityOrdered: item.quantityOrdered,
         unitCost: item.unitCost,
         taxRate: item.taxRate ?? 0,
         discountRate: item.discountRate ?? 0,
-        subtotal: net + tax,
+        subtotal: round2(net + tax),
         location: item.location,
         notes: item.notes,
       };
@@ -77,7 +80,7 @@ export class PurchaseUseCase {
         status: 'draft',
         subtotal,
         taxAmount,
-        total: subtotal + taxAmount,
+        total: round2(subtotal + taxAmount),
         expectedDate: dto.expectedDate ? new Date(dto.expectedDate) : null,
         paymentTerms: dto.paymentTerms,
         notes: dto.notes,
@@ -88,107 +91,126 @@ export class PurchaseUseCase {
     });
   }
 
+  /**
+   * Recepción de mercancía. Todo ocurre en una transacción con incrementos atómicos,
+   * así las ventas simultáneas en la sucursal no "pierden" unidades.
+   * También recalcula el costo promedio ponderado del producto.
+   */
   async receiveItems(
     purchaseOrderId: string,
     tenantId: string,
     dto: ReceiveItemsDto,
     receivedById: string,
   ) {
-    const order = await this.prisma.purchaseOrder.findFirst({
-      where: {
-        id: purchaseOrderId,
-        tenantId,
-        status: { in: ['sent', 'confirmed', 'partial_received'] },
-      },
-      include: { items: true },
-    });
-    if (!order) throw new NotFoundException('Orden no encontrada o ya recibida');
+    if (!dto.items?.length) throw new BadRequestException('Indica las cantidades recibidas');
 
-    const validItems = dto.items
-      .map((received) => ({ received, orderItem: order.items.find((i) => i.id === received.purchaseOrderItemId) }))
-      .filter((x): x is { received: typeof dto.items[0]; orderItem: NonNullable<typeof x.orderItem> } => !!x.orderItem);
-
-    for (const { received, orderItem } of validItems) {
-      const newReceived = Number(orderItem.quantityReceived) + received.quantityReceived;
-      if (newReceived > Number(orderItem.quantityOrdered)) {
-        throw new BadRequestException(
-          `No se puede recibir más de lo pedido para el ítem ${orderItem.productId}`,
-        );
-      }
-    }
-
-    const productIds = validItems.map(({ orderItem }) => orderItem.productId);
-    const existingStocks = await this.prisma.inventoryStock.findMany({
-      where: { tenantId, branchId: order.branchId, productId: { in: productIds } },
-    });
-    const stockMap = new Map(existingStocks.map((s) => [s.productId, s]));
-
-    return this.prisma.$transaction(async (tx) => {
-      const movementsData: Prisma.InventoryMovementCreateManyInput[] = [];
-
-      for (const { received, orderItem } of validItems) {
-        const newReceived = Number(orderItem.quantityReceived) + received.quantityReceived;
-        await tx.purchaseOrderItem.update({
-          where: { id: orderItem.id },
-          data: { quantityReceived: newReceived },
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const order = await tx.purchaseOrder.findFirst({
+          where: {
+            id: purchaseOrderId,
+            tenantId,
+            status: { in: ['sent', 'confirmed', 'partial_received'] },
+          },
+          include: { items: true },
         });
+        if (!order) throw new NotFoundException('Orden no encontrada o ya recibida');
 
-        let stock = stockMap.get(orderItem.productId);
-        const stockBefore = Number(stock?.quantity ?? 0);
-        const newQty = stockBefore + received.quantityReceived;
+        for (const received of dto.items) {
+          if (!(received.quantityReceived > 0)) continue;
+          const orderItem = order.items.find((i) => i.id === received.purchaseOrderItemId);
+          if (!orderItem) throw new BadRequestException('Un ítem no pertenece a esta orden');
 
-        if (!stock) {
-          stock = await tx.inventoryStock.create({
+          // Incremento condicionado: nunca se recibe más de lo pedido, ni con peticiones concurrentes
+          const updated = await tx.$executeRaw`
+            UPDATE purchase_order_items
+               SET quantity_received = quantity_received + ${received.quantityReceived}
+             WHERE id = ${orderItem.id}
+               AND quantity_received + ${received.quantityReceived} <= quantity_ordered`;
+          if (updated === 0) {
+            throw new BadRequestException('No se puede recibir más de lo pedido para uno de los productos');
+          }
+
+          const key = {
+            tenantId_productId_branchId: { tenantId, productId: orderItem.productId, branchId: order.branchId },
+          };
+          const before = await tx.inventoryStock.findUnique({ where: key, select: { quantity: true } });
+          const stock = await tx.inventoryStock.upsert({
+            where: key,
+            create: {
+              tenantId,
+              productId: orderItem.productId,
+              branchId: order.branchId,
+              quantity: received.quantityReceived,
+              reserved: 0,
+              location: received.location,
+            },
+            update: {
+              quantity: { increment: received.quantityReceived },
+              ...(received.location ? { location: received.location } : {}),
+            },
+          });
+
+          await tx.inventoryMovement.create({
             data: {
               tenantId,
               productId: orderItem.productId,
               branchId: order.branchId,
-              quantity: newQty,
-              reserved: 0,
-              location: received.location,
+              type: 'purchase_in',
+              quantity: received.quantityReceived,
+              direction: 1,
+              stockBefore: Number(before?.quantity ?? 0),
+              stockAfter: Number(stock.quantity),
+              unitCost: orderItem.unitCost,
+              referenceType: 'purchase_order',
+              referenceId: purchaseOrderId,
+              notes: dto.notes,
+              performedById: receivedById,
             },
           });
-          stockMap.set(orderItem.productId, stock);
-        } else {
-          await tx.inventoryStock.update({
-            where: { id: stock.id },
-            data: { quantity: newQty, ...(received.location ? { location: received.location } : {}) },
+
+          // Costo promedio ponderado sobre el stock total de la empresa
+          const product = await tx.product.findUnique({
+            where: { id: orderItem.productId },
+            select: { costPrice: true, inventoryStock: { select: { quantity: true } } },
           });
-          stockMap.set(orderItem.productId, { ...stock, quantity: newQty as unknown as typeof stock.quantity });
+          if (product) {
+            const totalQty = product.inventoryStock.reduce((acc, st) => acc + Number(st.quantity), 0);
+            const prevQty = Math.max(0, totalQty - received.quantityReceived);
+            const newCost =
+              totalQty > 0
+                ? (prevQty * Number(product.costPrice ?? 0) +
+                    received.quantityReceived * Number(orderItem.unitCost)) /
+                  totalQty
+                : Number(orderItem.unitCost);
+            await tx.product.update({
+              where: { id: orderItem.productId },
+              data: { costPrice: Math.round(newCost * 10_000) / 10_000 },
+            });
+          }
         }
 
-        movementsData.push({
-          tenantId,
-          productId: orderItem.productId,
-          branchId: order.branchId,
-          type: 'purchase_in',
-          quantity: received.quantityReceived,
-          direction: 1,
-          stockBefore,
-          stockAfter: newQty,
-          unitCost: orderItem.unitCost,
-          referenceType: 'purchase_order',
-          referenceId: purchaseOrderId,
-          notes: dto.notes,
-          performedById: receivedById,
+        const allItems = await tx.purchaseOrderItem.findMany({ where: { purchaseOrderId } });
+        const allReceived = allItems.every((i) => Number(i.quantityReceived) >= Number(i.quantityOrdered));
+        const anyReceived = allItems.some((i) => Number(i.quantityReceived) > 0);
+        const newStatus = allReceived ? 'received' : anyReceived ? 'partial_received' : order.status;
+
+        return tx.purchaseOrder.update({
+          where: { id: purchaseOrderId },
+          data: { status: newStatus, ...(allReceived ? { receivedDate: new Date() } : {}) },
+          include: { items: true },
         });
-      }
+      },
+      { timeout: 30_000 },
+    );
 
-      if (movementsData.length > 0) {
-        await tx.inventoryMovement.createMany({ data: movementsData });
-      }
-
-      const allItems = await tx.purchaseOrderItem.findMany({ where: { purchaseOrderId } });
-      const allReceived = allItems.every((i) => Number(i.quantityReceived) >= Number(i.quantityOrdered));
-      const anyReceived = allItems.some((i) => Number(i.quantityReceived) > 0);
-      const newStatus = allReceived ? 'received' : anyReceived ? 'partial_received' : 'sent';
-
-      return tx.purchaseOrder.update({
-        where: { id: purchaseOrderId },
-        data: { status: newStatus, ...(allReceived ? { receivedDate: new Date() } : {}) },
-        include: { items: true },
-      });
-    });
+    await Promise.all([
+      this.cache.invalidatePattern(`INV_STOCK:${tenantId}:*`),
+      this.cache.invalidatePattern(`INV_LOW_STOCK:${tenantId}:*`),
+      this.cache.invalidatePattern(`INV_VALUATION:${tenantId}:*`),
+      this.cache.invalidatePattern(`PROD_LIST:${tenantId}:*`),
+    ]);
+    return result;
   }
 
   async findMany(tenantId: string, query: {
@@ -224,16 +246,17 @@ export class PurchaseUseCase {
 
   private async generateOrderNumber(tenantId: string): Promise<string> {
     const year = new Date().getFullYear();
+    const base = `OC${year}-`;
     const last = await this.prisma.purchaseOrder.findFirst({
-      where: { tenantId, orderNumber: { startsWith: `OC${year}-` } },
-      orderBy: { createdAt: 'desc' },
+      where: { tenantId, orderNumber: { startsWith: base } },
+      orderBy: { orderNumber: 'desc' },
       select: { orderNumber: true },
     });
-    const lastNum = last?.orderNumber ? parseInt(last.orderNumber.split('-')[1] ?? '0', 10) : 0;
-    return `OC${year}-${String(lastNum + 1).padStart(6, '0')}`;
+    const lastNum = last ? parseInt(last.orderNumber.slice(base.length), 10) || 0 : 0;
+    return `${base}${String(lastNum + 1).padStart(6, '0')}`;
   }
 
-  // createWithRetry kept as P2002 safeguard in case of simultaneous inserts
+  /** Reintenta si dos órdenes simultáneas obtienen el mismo número (violación única P2002). */
   async createWithRetry(dto: CreatePurchaseOrderDto, tenantId: string, createdById: string) {
     for (let attempt = 0; attempt < 5; attempt++) {
       try {

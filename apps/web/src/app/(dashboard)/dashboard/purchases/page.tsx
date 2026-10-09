@@ -1,527 +1,497 @@
 'use client';
 
-import { useRef, useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Eye, FileText, Plus, Search, Truck, Upload, X, CheckCircle2, ExternalLink } from 'lucide-react';
-import { useForm, useFieldArray } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
-import { apiClient, type PaginatedResponse } from '@/lib/api-client';
-import { formatCurrency, formatDateTime } from '@/lib/utils';
+import { useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { CheckCircle2, Eye, Loader2, PackageCheck, Plus, Send, Trash2, Truck, XCircle } from 'lucide-react';
+import { apiClient, getErrorMessage, type Paginated } from '@/lib/api-client';
+import { formatCurrency, formatDate, formatNumber } from '@/lib/utils';
+import { PURCHASE_STATUS } from '@/lib/labels';
+import { round2 } from '@/lib/sale-math';
+import { useBranches } from '@/hooks/use-branches';
+import { useCatalog } from '@/hooks/use-catalog';
+import { useUiStore } from '@/stores/ui.store';
+import { useAuthStore } from '@/stores/auth.store';
+import { toast } from '@/hooks/use-toast';
+import { PageHeader } from '@/components/common/page-header';
+import { EmptyState } from '@/components/common/empty-state';
+import { ErrorState } from '@/components/common/error-state';
+import { Combobox } from '@/components/common/combobox';
+import { confirm } from '@/components/common/confirm-dialog';
+import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Paginator } from '@/components/ui/paginator';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Separator } from '@/components/ui/separator';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { toast } from '@/hooks/use-toast';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
-type PurchaseDocument = {
+type OrderRow = {
   id: string;
-  type: string;
-  title: string;
-  description?: string;
-  fileUrl: string;
-  mimeType: string;
-  fileSize?: number;
+  orderNumber: string;
+  status: string;
+  total: string;
   createdAt: string;
+  expectedDate: string | null;
+  supplier: { name: string } | null;
+  branch: { name: string } | null;
+  _count: { items: number };
 };
 
-type Purchase = {
-  id: string;
-  purchaseNumber: string;
-  status: 'PENDING' | 'RECEIVED' | 'CANCELLED' | 'PARTIAL';
-  total: number;
-  expectedDate?: string;
-  createdAt: string;
-  contractUrl?: string;
-  contractSigned?: boolean;
-  supplier?: { name: string };
-  items: { product: { name: string }; quantity: number; unitCost: number }[];
+type OrderDetail = OrderRow & {
+  subtotal: string;
+  taxAmount: string;
+  notes: string | null;
+  receivedDate: string | null;
+  items: Array<{
+    id: string;
+    productId: string;
+    quantityOrdered: string;
+    quantityReceived: string;
+    unitCost: string;
+    taxRate: string;
+    subtotal: string;
+    product: { name: string; internalCode: string | null };
+  }>;
 };
 
-const purchaseSchema = z.object({
-  supplierId: z.string().optional(),
-  expectedDate: z.string().optional(),
-  notes: z.string().optional(),
-  items: z.array(z.object({
-    productId: z.string().min(1),
-    quantity: z.coerce.number().positive(),
-    unitCost: z.coerce.number().positive(),
-  })).min(1),
-});
+type Supplier = { id: string; name: string };
+type DraftLine = { productId: string; quantity: string; unitCost: string; taxRate: string };
 
-type PurchaseForm = z.infer<typeof purchaseSchema>;
+const emptyLine = (): DraftLine => ({ productId: '', quantity: '1', unitCost: '', taxRate: '0' });
 
-type SupplierOption = { id: string; name: string };
-type ProductOption = { id: string; name: string; sku: string; cost: number };
-
-const statusConfig: Record<string, { label: string; variant: 'success' | 'warning' | 'destructive' | 'secondary' }> = {
-  RECEIVED: { label: 'Recibida', variant: 'success' },
-  PENDING: { label: 'Pendiente', variant: 'warning' },
-  PARTIAL: { label: 'Parcial', variant: 'secondary' },
-  CANCELLED: { label: 'Cancelada', variant: 'destructive' },
-};
-
-const docTypeLabels: Record<string, string> = {
-  contract: 'Contrato',
-  invoice: 'Factura',
-  purchase_order: 'Orden de compra',
-  evidence: 'Evidencia',
-  receipt: 'Recibo',
-  certificate: 'Certificado',
-  attachment: 'Adjunto',
-  other: 'Otro',
-};
-
-function formatFileSize(bytes?: number) {
-  if (!bytes) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function PurchaseDocumentPanel({ purchaseId, contractSigned }: { purchaseId: string; contractSigned?: boolean }) {
+export default function PurchasesPage() {
   const qc = useQueryClient();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [docType, setDocType] = useState('contract');
-  const [docTitle, setDocTitle] = useState('');
-  const [docDesc, setDocDesc] = useState('');
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
-  const [viewerMime, setViewerMime] = useState<string>('');
+  const user = useAuthStore((s) => s.user);
+  const branchFilter = useUiStore((s) => s.branchId);
+  const { data: branches = [] } = useBranches();
+  const [page, setPage] = useState(1);
+  const [status, setStatus] = useState('all');
+  const [viewId, setViewId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [receiveQty, setReceiveQty] = useState<Record<string, string>>({});
 
-  const { data: docs, isLoading } = useQuery<PurchaseDocument[]>({
-    queryKey: ['purchase-docs', purchaseId],
-    queryFn: async () => {
-      const { data } = await apiClient.get(`/purchases/${purchaseId}/documents`);
-      return Array.isArray(data.data) ? data.data : data.data ?? [];
-    },
+  const can = (p: string) => user?.permissions.includes(p) ?? false;
+
+  const params = { page, limit: 20, status: status === 'all' ? undefined : status, branchId: branchFilter || undefined };
+  const { data, isLoading, isError, error, refetch } = useQuery<Paginated<OrderRow>>({
+    queryKey: ['purchases', params],
+    queryFn: async () => (await apiClient.get('/purchases', { params })).data.data,
+    placeholderData: (prev) => prev,
   });
 
-  const uploadMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedFile || !docTitle) throw new Error('Completa los campos');
-      const form = new FormData();
-      form.append('file', selectedFile);
-      form.append('type', docType);
-      form.append('title', docTitle);
-      if (docDesc) form.append('description', docDesc);
-      await apiClient.post(`/purchases/${purchaseId}/documents`, form, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['purchase-docs', purchaseId] });
-      setSelectedFile(null);
-      setDocTitle('');
-      setDocDesc('');
-      if (fileRef.current) fileRef.current.value = '';
-      toast({ title: 'Documento adjuntado correctamente' });
-    },
-    onError: (e: any) => toast({ variant: 'destructive', title: 'Error al adjuntar', description: e?.response?.data?.message ?? '' }),
+  const { data: detail } = useQuery<OrderDetail>({
+    queryKey: ['purchases', 'detail', viewId],
+    enabled: !!viewId,
+    queryFn: async () => (await apiClient.get(`/purchases/${viewId}`)).data.data,
   });
 
-  const signMutation = useMutation({
-    mutationFn: () => apiClient.patch(`/purchases/${purchaseId}/contract-signed`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['purchases'] });
-      toast({ title: 'Contrato marcado como firmado' });
-    },
-  });
-
-  const openDocument = async (docId: string) => {
-    try {
-      const { data } = await apiClient.get(`/documents/${docId}/signed-url`);
-      const info = data.data ?? data;
-      setViewerMime(info.mimeType ?? '');
-      setViewerUrl(info.url);
-    } catch {
-      toast({ variant: 'destructive', title: 'No se pudo obtener el documento' });
-    }
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ['purchases'] });
+    void qc.invalidateQueries({ queryKey: ['inventory'] });
+    void qc.invalidateQueries({ queryKey: ['products'] });
   };
 
+  const action = useMutation({
+    mutationFn: async ({ id, step, body }: { id: string; step: 'approve' | 'send' | 'receive' | 'cancel'; body?: unknown }) =>
+      apiClient.patch(`/purchases/${id}/${step}`, body),
+    onSuccess: (_r, vars) => {
+      const msg = { approve: 'Orden aprobada', send: 'Orden enviada al proveedor', receive: 'Mercancía recibida e inventario actualizado', cancel: 'Orden cancelada' }[vars.step];
+      toast({ title: msg });
+      setReceiveQty({});
+      refresh();
+    },
+    onError: (err) => toast({ variant: 'destructive', title: 'No se pudo completar la acción', description: getErrorMessage(err) }),
+  });
+
+  const rows = data?.data ?? [];
+  const pendingLines = detail?.items.filter((i) => Number(i.quantityReceived) < Number(i.quantityOrdered)) ?? [];
+  const canReceive = detail && ['sent', 'confirmed', 'partial_received'].includes(detail.status) && can('purchases:receive');
+
   return (
-    <div className="space-y-4">
-      {viewerUrl && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg w-full max-w-4xl h-[85vh] flex flex-col">
-            <div className="flex items-center justify-between p-3 border-b">
-              <span className="text-sm font-medium">Visualizador de documento</span>
-              <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => window.open(viewerUrl, '_blank')}>
-                  <ExternalLink className="h-3.5 w-3.5 mr-1" /> Abrir en nueva pestaña
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => setViewerUrl(null)}><X className="h-4 w-4" /></Button>
-              </div>
-            </div>
-            <div className="flex-1 overflow-hidden">
-              {viewerMime.startsWith('image/') ? (
-                <img src={viewerUrl} alt="Documento" className="w-full h-full object-contain p-4" />
-              ) : (
-                <iframe src={viewerUrl} className="w-full h-full border-0" title="Documento" />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <h4 className="text-sm font-semibold">Documentos adjuntos</h4>
-          {!contractSigned ? (
-            <Button size="sm" variant="outline" onClick={() => signMutation.mutate()} disabled={signMutation.isPending}>
-              <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Marcar contrato firmado
+    <div className="space-y-6">
+      <PageHeader
+        title="Compras"
+        description="Órdenes de compra a proveedores, aprobación y recepción de mercancía por sede"
+        icon={Truck}
+        actions={
+          can('purchases:create') && (
+            <Button onClick={() => setCreating(true)}>
+              <Plus /> Nueva orden
             </Button>
-          ) : (
-            <Badge variant="success" className="text-xs">Contrato firmado</Badge>
-          )}
-        </div>
+          )
+        }
+      />
 
-        {isLoading ? (
-          <div className="space-y-2">{[1, 2].map(i => <Skeleton key={i} className="h-12 w-full" />)}</div>
-        ) : !docs || docs.length === 0 ? (
-          <div className="text-center py-6 text-muted-foreground text-sm border rounded-lg">
-            <FileText className="h-6 w-6 mx-auto mb-1 opacity-40" />
-            Sin documentos adjuntos
-          </div>
+      <Card>
+        <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-muted-foreground">{data ? `${data.meta.total} órdenes` : ' '}</p>
+          <Select value={status} onValueChange={(v) => { setStatus(v); setPage(1); }}>
+            <SelectTrigger className="sm:w-56">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todos los estados</SelectItem>
+              {Object.entries(PURCHASE_STATUS).map(([v, s]) => (
+                <SelectItem key={v} value={v}>
+                  {s.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        {isError ? (
+          <ErrorState error={error} onRetry={() => refetch()} />
         ) : (
-          <div className="space-y-2">
-            {docs.map((doc) => (
-              <div key={doc.id} className="flex items-center gap-3 p-3 border rounded-lg bg-muted/30">
-                <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{doc.title}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {docTypeLabels[doc.type] ?? doc.type} · {formatDateTime(doc.createdAt)}
-                    {doc.fileSize ? ` · ${formatFileSize(doc.fileSize)}` : ''}
-                  </p>
-                </div>
-                <Button size="sm" variant="ghost" onClick={() => openDocument(doc.id)}>
-                  <Eye className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <Separator />
-
-      <div className="space-y-3">
-        <h4 className="text-sm font-semibold">Adjuntar nuevo documento</h4>
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <Label className="text-xs">Tipo</Label>
-            <Select value={docType} onValueChange={setDocType}>
-              <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {Object.entries(docTypeLabels).map(([k, v]) => (
-                  <SelectItem key={k} value={k}>{v}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1">
-            <Label className="text-xs">Título *</Label>
-            <Input className="h-8 text-xs" value={docTitle} onChange={(e) => setDocTitle(e.target.value)} placeholder="Ej: Contrato proveedor XYZ" />
-          </div>
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Descripción (opcional)</Label>
-          <Input className="h-8 text-xs" value={docDesc} onChange={(e) => setDocDesc(e.target.value)} placeholder="Observaciones..." />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Archivo (PDF, imagen, documento)</Label>
-          <div
-            className="border-2 border-dashed rounded-lg p-4 text-center cursor-pointer hover:bg-muted/30 transition-colors"
-            onClick={() => fileRef.current?.click()}
-          >
-            {selectedFile ? (
-              <div className="flex items-center justify-center gap-2 text-sm">
-                <FileText className="h-4 w-4" />
-                <span className="font-medium truncate max-w-[200px]">{selectedFile.name}</span>
-                <button className="text-muted-foreground hover:text-foreground" onClick={(e) => { e.stopPropagation(); setSelectedFile(null); if (fileRef.current) fileRef.current.value = ''; }}>
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            ) : (
-              <div className="text-muted-foreground text-xs">
-                <Upload className="h-5 w-5 mx-auto mb-1" />
-                Haz clic para seleccionar archivo
+          <>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Orden</TableHead>
+                  <TableHead>Proveedor</TableHead>
+                  <TableHead className="hidden md:table-cell">Sede destino</TableHead>
+                  <TableHead className="hidden lg:table-cell">Entrega</TableHead>
+                  <TableHead>Estado</TableHead>
+                  <TableHead className="text-right">Total</TableHead>
+                  <TableHead className="w-12" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {isLoading
+                  ? Array.from({ length: 6 }).map((_, i) => (
+                      <TableRow key={i}>
+                        <TableCell colSpan={7}>
+                          <Skeleton className="h-6 w-full" />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  : rows.map((o) => {
+                      const st = PURCHASE_STATUS[o.status] ?? { label: o.status, tone: 'secondary' as const };
+                      return (
+                        <TableRow key={o.id} className="cursor-pointer" onClick={() => setViewId(o.id)}>
+                          <TableCell>
+                            <p className="font-medium">{o.orderNumber}</p>
+                            <p className="text-xs text-muted-foreground">{formatDate(o.createdAt)} · {o._count.items} ítem(s)</p>
+                          </TableCell>
+                          <TableCell>{o.supplier?.name}</TableCell>
+                          <TableCell className="hidden text-muted-foreground md:table-cell">{o.branch?.name}</TableCell>
+                          <TableCell className="hidden text-muted-foreground lg:table-cell">{o.expectedDate ? formatDate(o.expectedDate) : '—'}</TableCell>
+                          <TableCell>
+                            <Badge variant={st.tone}>{st.label}</Badge>
+                          </TableCell>
+                          <TableCell className="tabular text-right font-semibold">{formatCurrency(Number(o.total))}</TableCell>
+                          <TableCell>
+                            <Button variant="ghost" size="icon" aria-label="Ver orden">
+                              <Eye />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+              </TableBody>
+            </Table>
+            {!isLoading && rows.length === 0 && <EmptyState icon={Truck} title="No hay órdenes de compra" />}
+            {(data?.meta.totalPages ?? 0) > 1 && (
+              <div className="border-t p-4">
+                <Paginator page={page} totalPages={data!.meta.totalPages} total={data!.meta.total} onPageChange={setPage} />
               </div>
             )}
-          </div>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.doc,.docx,.xls,.xlsx"
-            className="hidden"
-            onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
-          />
-        </div>
-        <Button
-          size="sm"
-          className="w-full"
-          disabled={!selectedFile || !docTitle || uploadMutation.isPending}
-          onClick={() => uploadMutation.mutate()}
-        >
-          <Upload className="h-3.5 w-3.5 mr-1" />
-          {uploadMutation.isPending ? 'Subiendo...' : 'Adjuntar documento'}
-        </Button>
-      </div>
+          </>
+        )}
+      </Card>
+
+      {/* Detalle y flujo de la orden */}
+      <Dialog open={!!viewId} onOpenChange={(o) => { if (!o) { setViewId(null); setReceiveQty({}); } }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-3">
+              Orden {detail?.orderNumber}
+              {detail && <Badge variant={PURCHASE_STATUS[detail.status]?.tone ?? 'secondary'}>{PURCHASE_STATUS[detail.status]?.label ?? detail.status}</Badge>}
+            </DialogTitle>
+            <DialogDescription>
+              {detail ? `${detail.supplier?.name} → ${detail.branch?.name}` : 'Cargando...'}
+            </DialogDescription>
+          </DialogHeader>
+          {!detail ? (
+            <Skeleton className="h-64 w-full" />
+          ) : (
+            <div className="space-y-4">
+              <div className="overflow-hidden rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Producto</TableHead>
+                      <TableHead className="text-right">Pedido</TableHead>
+                      <TableHead className="text-right">Recibido</TableHead>
+                      <TableHead className="text-right">Costo</TableHead>
+                      {canReceive && <TableHead className="w-28 text-right">Recibir</TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {detail.items.map((i) => {
+                      const remaining = round2(Number(i.quantityOrdered) - Number(i.quantityReceived));
+                      return (
+                        <TableRow key={i.id}>
+                          <TableCell>
+                            <p className="font-medium">{i.product.name}</p>
+                            <p className="text-xs text-muted-foreground">{i.product.internalCode}</p>
+                          </TableCell>
+                          <TableCell className="tabular text-right">{formatNumber(Number(i.quantityOrdered), 2)}</TableCell>
+                          <TableCell className="tabular text-right">{formatNumber(Number(i.quantityReceived), 2)}</TableCell>
+                          <TableCell className="tabular text-right">{formatCurrency(Number(i.unitCost))}</TableCell>
+                          {canReceive && (
+                            <TableCell className="text-right">
+                              {remaining > 0 ? (
+                                <Input
+                                  className="tabular ml-auto h-8 w-24 text-right"
+                                  inputMode="decimal"
+                                  placeholder={String(remaining)}
+                                  value={receiveQty[i.id] ?? ''}
+                                  onChange={(e) => setReceiveQty({ ...receiveQty, [i.id]: e.target.value.replace(/[^\d.]/g, '') })}
+                                />
+                              ) : (
+                                <CheckCircle2 className="ml-auto h-4 w-4 text-success" />
+                              )}
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="flex flex-col gap-1 text-sm sm:items-end">
+                <p className="text-muted-foreground">
+                  Subtotal <span className="tabular ml-4 text-foreground">{formatCurrency(Number(detail.subtotal))}</span>
+                </p>
+                <p className="text-muted-foreground">
+                  Impuestos <span className="tabular ml-4 text-foreground">{formatCurrency(Number(detail.taxAmount))}</span>
+                </p>
+                <p className="font-semibold">
+                  Total <span className="tabular ml-4">{formatCurrency(Number(detail.total))}</span>
+                </p>
+              </div>
+              {detail.notes && <p className="rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground">{detail.notes}</p>}
+            </div>
+          )}
+          {detail && (
+            <DialogFooter className="flex-wrap gap-2">
+              {['draft', 'sent', 'confirmed'].includes(detail.status) && can('purchases:delete') && (
+                <Button
+                  variant="outline"
+                  className="text-destructive"
+                  onClick={async () => {
+                    if (await confirm({ title: '¿Cancelar la orden?', description: 'La orden no podrá recibirse después.', destructive: true, confirmText: 'Cancelar orden' }))
+                      action.mutate({ id: detail.id, step: 'cancel' });
+                  }}
+                >
+                  <XCircle /> Cancelar orden
+                </Button>
+              )}
+              {detail.status === 'draft' && can('purchases:approve') && (
+                <Button variant="outline" onClick={() => action.mutate({ id: detail.id, step: 'approve' })}>
+                  <CheckCircle2 /> Aprobar
+                </Button>
+              )}
+              {['draft', 'confirmed'].includes(detail.status) && can('purchases:update') && (
+                <Button variant="outline" onClick={() => action.mutate({ id: detail.id, step: 'send' })}>
+                  <Send /> Marcar como enviada
+                </Button>
+              )}
+              {canReceive && pendingLines.length > 0 && (
+                <>
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      setReceiveQty(Object.fromEntries(pendingLines.map((i) => [i.id, String(round2(Number(i.quantityOrdered) - Number(i.quantityReceived)))])))
+                    }
+                  >
+                    Recibir todo
+                  </Button>
+                  <Button
+                    disabled={action.isPending || !Object.values(receiveQty).some((v) => Number(v) > 0)}
+                    onClick={() =>
+                      action.mutate({
+                        id: detail.id,
+                        step: 'receive',
+                        body: {
+                          items: Object.entries(receiveQty)
+                            .filter(([, v]) => Number(v) > 0)
+                            .map(([purchaseOrderItemId, v]) => ({ purchaseOrderItemId, quantityReceived: Number(v) })),
+                        },
+                      })
+                    }
+                  >
+                    {action.isPending ? <Loader2 className="animate-spin" /> : <PackageCheck />}
+                    Registrar recepción
+                  </Button>
+                </>
+              )}
+            </DialogFooter>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <CreateOrderDialog open={creating} onClose={() => setCreating(false)} branches={branches} onCreated={refresh} />
     </div>
   );
 }
 
-export default function PurchasesPage() {
-  const qc = useQueryClient();
-  const [search, setSearch] = useState('');
-  const [page, setPage] = useState(1);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [viewPurchase, setViewPurchase] = useState<Purchase | null>(null);
+function CreateOrderDialog({
+  open,
+  onClose,
+  branches,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  branches: Array<{ id: string; name: string }>;
+  onCreated: () => void;
+}) {
+  const [supplierId, setSupplierId] = useState('');
+  const [branchId, setBranchId] = useState('');
+  const [expectedDate, setExpectedDate] = useState('');
+  const [notes, setNotes] = useState('');
+  const [lines, setLines] = useState<DraftLine[]>([emptyLine()]);
+  const { data: catalog = [] } = useCatalog(undefined, open);
+  const { data: suppliers = [] } = useQuery<Supplier[]>({
+    queryKey: ['suppliers', 'options'],
+    enabled: open,
+    queryFn: async () => (await apiClient.get('/suppliers', { params: { limit: 100 } })).data.data?.data ?? [],
+  });
 
-  const { data, isLoading } = useQuery<PaginatedResponse<Purchase>['data']>({
-    queryKey: ['purchases', search, page],
-    queryFn: async () => {
-      try {
-        const { data } = await apiClient.get('/purchases', { params: { search, page, limit: 15 } });
-        const p = data.data;
-        return { items: Array.isArray(p.data) ? p.data : [], total: p.meta?.total ?? 0, page: p.meta?.page ?? 1, limit: p.meta?.limit ?? 15, totalPages: p.meta?.totalPages ?? 1 };
-      } catch {
-        return { items: [], total: 0, page: 1, limit: 15, totalPages: 1 };
-      }
+  const total = useMemo(
+    () => lines.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.unitCost) || 0) * (1 + (Number(l.taxRate) || 0) / 100), 0),
+    [lines],
+  );
+
+  const reset = () => {
+    setSupplierId('');
+    setBranchId('');
+    setExpectedDate('');
+    setNotes('');
+    setLines([emptyLine()]);
+  };
+
+  const create = useMutation({
+    mutationFn: async () =>
+      apiClient.post('/purchases', {
+        supplierId,
+        branchId,
+        expectedDate: expectedDate || undefined,
+        notes: notes || undefined,
+        items: lines
+          .filter((l) => l.productId)
+          .map((l) => ({
+            productId: l.productId,
+            quantityOrdered: Number(l.quantity),
+            unitCost: Number(l.unitCost),
+            taxRate: (Number(l.taxRate) || 0) / 100,
+          })),
+      }),
+    onSuccess: () => {
+      toast({ title: 'Orden de compra creada', description: 'Quedó en borrador para aprobación.' });
+      reset();
+      onClose();
+      onCreated();
     },
+    onError: (err) => toast({ variant: 'destructive', title: 'No se pudo crear la orden', description: getErrorMessage(err) }),
   });
 
-  const { data: suppliers } = useQuery<SupplierOption[]>({
-    queryKey: ['suppliers-options'],
-    staleTime: 0,
-    queryFn: async () => {
-      const { data } = await apiClient.get('/suppliers', { params: { limit: 200 } });
-      const p = data.data;
-      return Array.isArray(p.data) ? p.data : [];
-    },
-  });
+  const valid =
+    supplierId && branchId && lines.some((l) => l.productId) && lines.every((l) => !l.productId || (Number(l.quantity) > 0 && Number(l.unitCost) >= 0 && l.unitCost !== ''));
 
-  const { data: products } = useQuery<ProductOption[]>({
-    queryKey: ['products-options'],
-    staleTime: 0,
-    queryFn: async () => {
-      const { data } = await apiClient.get('/products', { params: { limit: 500 } });
-      const p = data.data;
-      return Array.isArray(p.data) ? p.data : [];
-    },
-  });
-
-  const form = useForm<PurchaseForm>({
-    resolver: zodResolver(purchaseSchema),
-    defaultValues: { items: [{ productId: '', quantity: 1, unitCost: 0 }] },
-  });
-  const { fields, append, remove } = useFieldArray({ control: form.control, name: 'items' });
-
-  const createMutation = useMutation({
-    mutationFn: (body: PurchaseForm) => apiClient.post('/purchases', body),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['purchases'] }); setDialogOpen(false); toast({ title: 'Orden de compra creada' }); },
-    onError: () => toast({ variant: 'destructive', title: 'Error al crear orden de compra' }),
-  });
-
-  const total = form.watch('items').reduce((s, i) => s + i.quantity * i.unitCost, 0);
-  const purchases = data?.items ?? [];
-  const totalPages = data?.totalPages ?? 1;
+  const update = (idx: number, patch: Partial<DraftLine>) => setLines((ls) => ls.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold">Compras</h2>
-          <p className="text-muted-foreground text-sm">Órdenes de compra a proveedores</p>
-        </div>
-        <Button onClick={() => { form.reset({ items: [{ productId: '', quantity: 1, unitCost: 0 }] }); setDialogOpen(true); }}>
-          <Plus className="h-4 w-4" /> Nueva orden
-        </Button>
-      </div>
-
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="relative max-w-sm">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input placeholder="Buscar por número o proveedor..." className="pl-9" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} />
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Nueva orden de compra</DialogTitle>
+          <DialogDescription>La mercancía entrará al inventario de la sede destino cuando se registre la recepción.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <div className="space-y-2">
+            <Label>Proveedor</Label>
+            <Combobox options={suppliers.map((s) => ({ value: s.id, label: s.name }))} value={supplierId} onChange={setSupplierId} placeholder="Selecciona" />
           </div>
-        </CardHeader>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>N°</TableHead>
-                <TableHead>Proveedor</TableHead>
-                <TableHead>Fecha</TableHead>
-                <TableHead>Fecha esperada</TableHead>
-                <TableHead className="text-center">Estado</TableHead>
-                <TableHead className="text-right">Total</TableHead>
-                <TableHead />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {isLoading
-                ? [...Array(8)].map((_, i) => <TableRow key={i}>{[...Array(7)].map((_, j) => <TableCell key={j}><Skeleton className="h-5 w-full" /></TableCell>)}</TableRow>)
-                : purchases.length === 0
-                ? <TableRow><TableCell colSpan={7} className="text-center py-12 text-muted-foreground"><Truck className="h-8 w-8 mx-auto mb-2 opacity-50" />No hay órdenes de compra</TableCell></TableRow>
-                : purchases.map((p) => {
-                    const st = statusConfig[p.status] ?? { label: p.status, variant: 'secondary' as const };
-                    return (
-                      <TableRow key={p.id}>
-                        <TableCell className="font-mono text-xs">{p.purchaseNumber}</TableCell>
-                        <TableCell>{p.supplier?.name ?? 'Sin proveedor'}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{formatDateTime(p.createdAt)}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{p.expectedDate ? new Date(p.expectedDate).toLocaleDateString('es-CO') : '-'}</TableCell>
-                        <TableCell className="text-center"><Badge variant={st.variant}>{st.label}</Badge></TableCell>
-                        <TableCell className="text-right font-semibold">{formatCurrency(p.total)}</TableCell>
-                        <TableCell>
-                          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setViewPurchase(p)}>
-                            <Eye className="h-3.5 w-3.5" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      {totalPages > 1 && (
-        <div className="flex justify-center gap-2">
-          <Button variant="outline" size="sm" disabled={page === 1} onClick={() => setPage(p => p - 1)}>Anterior</Button>
-          <span className="text-sm self-center text-muted-foreground">Pág. {page} / {totalPages}</span>
-          <Button variant="outline" size="sm" disabled={page === totalPages} onClick={() => setPage(p => p + 1)}>Siguiente</Button>
+          <div className="space-y-2">
+            <Label>Sede destino</Label>
+            <Select value={branchId} onValueChange={setBranchId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Selecciona" />
+              </SelectTrigger>
+              <SelectContent>
+                {branches.map((b) => (
+                  <SelectItem key={b.id} value={b.id}>
+                    {b.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="po-date">Entrega estimada</Label>
+            <Input id="po-date" type="date" value={expectedDate} onChange={(e) => setExpectedDate(e.target.value)} />
+          </div>
         </div>
-      )}
 
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader><DialogTitle>Nueva orden de compra</DialogTitle></DialogHeader>
-          <form onSubmit={form.handleSubmit((d) => createMutation.mutate(d))} className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <Label>Proveedor</Label>
-                <Select onValueChange={(v) => form.setValue('supplierId', v)}>
-                  <SelectTrigger><SelectValue placeholder="Seleccionar proveedor..." /></SelectTrigger>
-                  <SelectContent>{(suppliers ?? []).map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
-                </Select>
+        <div className="space-y-2">
+          <div className="hidden grid-cols-[1fr_90px_130px_80px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground sm:grid">
+            <span>Producto</span>
+            <span>Cantidad</span>
+            <span>Costo unitario</span>
+            <span>IVA %</span>
+            <span />
+          </div>
+          {lines.map((l, idx) => (
+            <div key={idx} className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_90px_130px_80px_36px]">
+              <div className="col-span-2 sm:col-span-1">
+                <Combobox
+                  options={catalog.map((p) => ({ value: p.id, label: p.name, hint: p.internalCode ?? undefined }))}
+                  value={l.productId}
+                  onChange={(v) => {
+                    const p = catalog.find((c) => c.id === v);
+                    update(idx, { productId: v, unitCost: p ? String(p.costPrice) : l.unitCost, taxRate: p ? String(Math.round(p.taxRate * 100)) : l.taxRate });
+                  }}
+                  placeholder="Producto"
+                />
               </div>
-              <div className="space-y-1">
-                <Label>Fecha esperada de llegada</Label>
-                <Input type="date" {...form.register('expectedDate')} />
-              </div>
+              <Input inputMode="decimal" value={l.quantity} onChange={(e) => update(idx, { quantity: e.target.value.replace(/[^\d.]/g, '') })} aria-label="Cantidad" />
+              <Input inputMode="decimal" value={l.unitCost} onChange={(e) => update(idx, { unitCost: e.target.value.replace(/[^\d.]/g, '') })} aria-label="Costo" />
+              <Input inputMode="decimal" value={l.taxRate} onChange={(e) => update(idx, { taxRate: e.target.value.replace(/[^\d.]/g, '') })} aria-label="IVA" />
+              <Button variant="ghost" size="icon" onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((_, i) => i !== idx) : [emptyLine()]))} aria-label="Quitar línea">
+                <Trash2 />
+              </Button>
             </div>
-            <Separator />
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <Label>Productos *</Label>
-                <Button type="button" variant="outline" size="sm" onClick={() => append({ productId: '', quantity: 1, unitCost: 0 })}>
-                  <Plus className="h-3 w-3" /> Agregar
-                </Button>
-              </div>
-              {fields.map((field, i) => (
-                <div key={field.id} className="grid grid-cols-12 gap-2 items-end">
-                  <div className="col-span-6 space-y-1">
-                    {i === 0 && <Label className="text-xs">Producto</Label>}
-                    <Select onValueChange={(v) => {
-                      form.setValue(`items.${i}.productId`, v);
-                      const p = products?.find((p) => p.id === v);
-                      if (p) form.setValue(`items.${i}.unitCost`, p.cost);
-                    }}>
-                      <SelectTrigger className="h-9"><SelectValue placeholder="Seleccionar..." /></SelectTrigger>
-                      <SelectContent>{(products ?? []).map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
-                    </Select>
-                  </div>
-                  <div className="col-span-2 space-y-1">
-                    {i === 0 && <Label className="text-xs">Cantidad</Label>}
-                    <Input type="number" step="0.01" className="h-9" {...form.register(`items.${i}.quantity`)} />
-                  </div>
-                  <div className="col-span-3 space-y-1">
-                    {i === 0 && <Label className="text-xs">Costo unit.</Label>}
-                    <Input type="number" step="0.01" className="h-9" {...form.register(`items.${i}.unitCost`)} />
-                  </div>
-                  <div className="col-span-1">
-                    <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => remove(i)} disabled={fields.length === 1}>×</Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <Separator />
-            <div className="flex justify-end">
-              <div className="text-right space-y-1">
-                <p className="text-muted-foreground text-sm">Total de la orden</p>
-                <p className="text-2xl font-bold">{formatCurrency(total)}</p>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <Label>Notas</Label>
-              <Input {...form.register('notes')} placeholder="Observaciones..." />
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancelar</Button>
-              <Button type="submit" disabled={createMutation.isPending}>Crear orden</Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+          ))}
+          <Button variant="outline" size="sm" onClick={() => setLines((ls) => [...ls, emptyLine()])}>
+            <Plus /> Agregar producto
+          </Button>
+        </div>
 
-      {/* Ver detalle con documentos */}
-      <Dialog open={!!viewPurchase} onOpenChange={(o) => !o && setViewPurchase(null)}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              Orden {viewPurchase?.purchaseNumber}
-              {viewPurchase?.contractSigned && <Badge variant="success" className="text-xs">Contrato firmado</Badge>}
-            </DialogTitle>
-          </DialogHeader>
-          {viewPurchase && (
-            <Tabs defaultValue="detail">
-              <TabsList className="w-full">
-                <TabsTrigger value="detail" className="flex-1">Detalle</TabsTrigger>
-                <TabsTrigger value="documents" className="flex-1">
-                  <FileText className="h-3.5 w-3.5 mr-1" /> Documentos y Contratos
-                </TabsTrigger>
-              </TabsList>
+        <div className="space-y-2">
+          <Label htmlFor="po-notes">Notas</Label>
+          <Input id="po-notes" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Condiciones, referencias de cotización..." />
+        </div>
 
-              <TabsContent value="detail" className="space-y-4 pt-2">
-                <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div><span className="text-muted-foreground">Proveedor: </span>{viewPurchase.supplier?.name ?? 'N/A'}</div>
-                  <div><span className="text-muted-foreground">Fecha: </span>{formatDateTime(viewPurchase.createdAt)}</div>
-                  <div><span className="text-muted-foreground">Fecha esperada: </span>{viewPurchase.expectedDate ? new Date(viewPurchase.expectedDate).toLocaleDateString('es-CO') : 'N/A'}</div>
-                  <div><span className="text-muted-foreground">Estado: </span><Badge variant={statusConfig[viewPurchase.status]?.variant ?? 'secondary'}>{statusConfig[viewPurchase.status]?.label ?? viewPurchase.status}</Badge></div>
-                </div>
-                <Separator />
-                <div className="space-y-2">
-                  {viewPurchase.items.map((item, i) => (
-                    <div key={i} className="flex justify-between text-sm">
-                      <span>{item.product.name} × {item.quantity}</span>
-                      <span>{formatCurrency(item.unitCost * item.quantity)}</span>
-                    </div>
-                  ))}
-                </div>
-                <Separator />
-                <div className="flex justify-between font-bold text-sm">
-                  <span>Total</span>
-                  <span>{formatCurrency(viewPurchase.total)}</span>
-                </div>
-              </TabsContent>
-
-              <TabsContent value="documents" className="pt-2">
-                <PurchaseDocumentPanel purchaseId={viewPurchase.id} contractSigned={viewPurchase.contractSigned} />
-              </TabsContent>
-            </Tabs>
-          )}
-        </DialogContent>
-      </Dialog>
-    </div>
+        <DialogFooter className="items-center gap-3 sm:justify-between">
+          <p className="text-sm">
+            Total estimado: <span className="tabular font-semibold">{formatCurrency(total)}</span>
+          </p>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={onClose}>
+              Cancelar
+            </Button>
+            <Button disabled={!valid || create.isPending} onClick={() => create.mutate()}>
+              {create.isPending && <Loader2 className="animate-spin" />}
+              Crear orden
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

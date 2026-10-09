@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { InventoryUseCase } from './inventory.use-case';
 import { PrismaService } from '../../../../database/prisma.service';
+import { CacheService } from '../../../../cache/cache.service';
 
 const TENANT_ID = 'tenant-1';
 const BRANCH_ID = 'branch-1';
@@ -31,12 +32,20 @@ describe('InventoryUseCase', () => {
       createMany: jest.fn(),
     },
     purchaseOrderItem: { update: jest.fn(), findMany: jest.fn() },
+    $executeRaw: jest.fn(),
+  };
+
+  // Caché transparente: siempre ejecuta la consulta real
+  const cacheMock = {
+    getOrSet: jest.fn((_key: string, factory: () => Promise<unknown>) => factory()),
+    invalidatePattern: jest.fn().mockResolvedValue(undefined),
   };
 
   beforeEach(async () => {
-    Object.values(txMock).forEach((m) =>
-      Object.values(m as Record<string, jest.Mock>).forEach((fn) => fn.mockReset()),
-    );
+    Object.values(txMock).forEach((m) => {
+      if (typeof m === 'function') (m as jest.Mock).mockReset();
+      else Object.values(m as Record<string, jest.Mock>).forEach((fn) => fn.mockReset());
+    });
 
     prisma = {
       product: { findFirst: jest.fn() },
@@ -58,6 +67,7 @@ describe('InventoryUseCase', () => {
       providers: [
         InventoryUseCase,
         { provide: PrismaService, useValue: prisma },
+        { provide: CacheService, useValue: cacheMock },
       ],
     }).compile();
 
@@ -122,16 +132,16 @@ describe('InventoryUseCase', () => {
       (prisma['product'] as Record<string, jest.Mock>).findFirst.mockResolvedValue({ id: PRODUCT_ID });
       (prisma['branch'] as Record<string, jest.Mock>).findFirst.mockResolvedValue({ id: BRANCH_ID });
       txMock.inventoryStock.findFirst.mockResolvedValue(makeStock(10));
-      txMock.inventoryStock.updateMany.mockResolvedValue({ count: 1 });
+      txMock.$executeRaw.mockResolvedValue(1);
       txMock.inventoryMovement.create.mockResolvedValue({ id: 'mov-1', type: 'adjustment_out' });
 
       await useCase.adjustStock({ ...adjustDto, type: 'adjustment_out' as const }, TENANT_ID, USER_ID);
-      expect(txMock.inventoryStock.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({ quantity: { gte: 5 } }),
-          data: expect.objectContaining({ quantity: { decrement: 5 } }),
-        }),
-      );
+      // UPDATE condicionado (quantity - reserved >= cantidad) con la cantidad como parámetro
+      expect(txMock.$executeRaw).toHaveBeenCalledTimes(1);
+      const [sql, ...params] = txMock.$executeRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+      expect(sql.join('?')).toContain('quantity - reserved >=');
+      expect(params).toContain(5);
+      expect(cacheMock.invalidatePattern).toHaveBeenCalledWith(`INV_STOCK:${TENANT_ID}:*`);
     });
 
     it('throws BadRequestException when stock is insufficient for out movement', async () => {
@@ -173,11 +183,11 @@ describe('InventoryUseCase', () => {
       );
     });
 
-    it('throws BadRequestException on concurrent modification (updateMany returns 0)', async () => {
+    it('throws BadRequestException on concurrent modification (no rows updated)', async () => {
       (prisma['product'] as Record<string, jest.Mock>).findFirst.mockResolvedValue({ id: PRODUCT_ID });
       (prisma['branch'] as Record<string, jest.Mock>).findFirst.mockResolvedValue({ id: BRANCH_ID });
       txMock.inventoryStock.findFirst.mockResolvedValue(makeStock(10));
-      txMock.inventoryStock.updateMany.mockResolvedValue({ count: 0 }); // concurrent modification
+      txMock.$executeRaw.mockResolvedValue(0); // modificación concurrente
 
       await expect(
         useCase.adjustStock({ ...adjustDto, type: 'adjustment_out' as const }, TENANT_ID, USER_ID),
@@ -233,7 +243,7 @@ describe('InventoryUseCase', () => {
       txMock.inventoryStock.findFirst
         .mockResolvedValueOnce(makeStock(10)) // source stock
         .mockResolvedValueOnce(makeStock(5, 0, 'stock-2')); // destination stock
-      txMock.inventoryStock.updateMany.mockResolvedValue({ count: 1 });
+      txMock.$executeRaw.mockResolvedValue(1);
       txMock.inventoryStock.update.mockResolvedValue({});
       txMock.inventoryMovement.create.mockResolvedValue({});
 

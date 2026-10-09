@@ -13,7 +13,10 @@ import type { JwtPayload } from '@inventario/types';
 import type { Request } from 'express';
 
 const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-const SENSITIVE_FIELDS = new Set(['password', 'passwordHash', 'mfaSecret', 'mfaBackupCodes', 'token']);
+const SENSITIVE_FIELDS = new Set([
+  'password', 'passwordHash', 'newPassword', 'currentPassword', 'mfaSecret', 'mfaBackupCodes',
+  'token', 'refreshToken', 'mfaToken',
+]);
 
 function sanitizeData(data: unknown): unknown {
   if (data === null || data === undefined) return data;

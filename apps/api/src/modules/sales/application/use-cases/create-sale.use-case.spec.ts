@@ -1,288 +1,279 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
-import { CreateSaleUseCase } from './create-sale.use-case';
+import { Prisma } from '@prisma/client';
+import { CreateSaleUseCase, calculateLine, round2 } from './create-sale.use-case';
 import { PrismaService } from '../../../../database/prisma.service';
+import { CacheService } from '../../../../cache/cache.service';
 import { CashRegisterUseCase } from '../../../cash-register/application/use-cases/cash-register.use-case';
 import type { CreateSaleDto } from '../dtos/sale.dto';
 
 const TENANT_ID = 'tenant-1';
 const BRANCH_ID = 'branch-1';
-const USER_ID = 'user-1';
 const PRODUCT_ID = 'product-1';
+const USER_ID = 'user-1';
 const CURRENCY_ID = 'currency-1';
+
+function makeProduct(overrides: Record<string, unknown> = {}) {
+  return {
+    id: PRODUCT_ID,
+    name: 'Anillo de oro',
+    internalCode: 'AN-001',
+    taxRate: 0,
+    taxIncluded: false,
+    minSalePrice: 0,
+    trackInventory: true,
+    costPrice: 50,
+    ...overrides,
+  };
+}
 
 function makeDto(overrides: Partial<CreateSaleDto> = {}): CreateSaleDto {
   return {
     branchId: BRANCH_ID,
-    currencyId: CURRENCY_ID,
-    items: [
-      {
-        productId: PRODUCT_ID,
-        quantity: 2,
-        unitPrice: 100,
-        discount: 0,
-      },
-    ],
+    items: [{ productId: PRODUCT_ID, quantity: 2, unitPrice: 100 }],
     payments: [{ type: 'cash', amount: 200 }],
     ...overrides,
   } as CreateSaleDto;
 }
 
-function makeProduct(overrides: Record<string, unknown> = {}) {
-  return {
-    id: PRODUCT_ID,
-    name: 'Anillo de Oro',
-    internalCode: 'AO-001',
-    minSalePrice: 0,
-    trackInventory: true,
-    taxRate: 0,
-    taxIncluded: false,
-    costPrice: 50,
-    status: 'active',
-    ...overrides,
-  };
-}
+describe('calculateLine', () => {
+  it('adds tax on top of the price when tax is not included', () => {
+    const l = calculateLine({ productId: 'p', quantity: 2, unitPrice: 100, taxRate: 0.19, taxIncluded: false });
+    expect(l).toMatchObject({ net: 200, tax: 38, total: 238 });
+  });
 
-function makeStock(quantity = 10, reserved = 0) {
-  return { id: 'stock-1', quantity, reserved };
-}
+  it('extracts tax from the price when tax is included', () => {
+    const l = calculateLine({ productId: 'p', quantity: 1, unitPrice: 119, taxRate: 0.19, taxIncluded: true });
+    expect(l).toMatchObject({ net: 100, tax: 19, total: 119 });
+  });
 
-// tx mock — typed as plain object to avoid jest.Mock type conflicts
-interface TxMock {
-  product: { findFirst: jest.Mock };
-  sale: { create: jest.Mock; count: jest.Mock; findFirst: jest.Mock };
-  inventoryStock: { findFirst: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
-  inventoryMovement: { create: jest.Mock };
-  financialTransaction: { create: jest.Mock };
-  client: { update: jest.Mock };
-  currency: { findUnique: jest.Mock };
-}
+  it('applies the line discount before tax', () => {
+    const l = calculateLine({ productId: 'p', quantity: 1, unitPrice: 100, discount: 10, taxRate: 0.19, taxIncluded: false });
+    expect(l).toMatchObject({ net: 90, tax: 17.1, total: 107.1 });
+  });
+
+  it('rejects discounts larger than the line value', () => {
+    expect(() =>
+      calculateLine({ productId: 'p', quantity: 1, unitPrice: 10, discount: 11, taxRate: 0, taxIncluded: false }),
+    ).toThrow(BadRequestException);
+  });
+
+  it('rounds money without floating point drift', () => {
+    expect(round2(0.1 + 0.2)).toBe(0.3);
+    expect(round2(1.005)).toBe(1.01);
+  });
+});
 
 describe('CreateSaleUseCase', () => {
   let useCase: CreateSaleUseCase;
-  let prisma: Record<string, unknown>;
-  let cashRegisterUseCase: jest.Mocked<CashRegisterUseCase>;
-
-  const txMock: TxMock = {
-    product: { findFirst: jest.fn() },
-    sale: { create: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
-    inventoryStock: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
-    inventoryMovement: { create: jest.fn() },
-    financialTransaction: { create: jest.fn() },
-    client: { update: jest.fn() },
-    currency: { findUnique: jest.fn() },
-  };
+  let prisma: Record<string, any>;
+  let tx: Record<string, any>;
+  let cashRegister: { addMovement: jest.Mock };
+  let cache: { invalidatePattern: jest.Mock };
 
   beforeEach(async () => {
-    const transactionFn = jest.fn().mockImplementation(async (cb) => cb(txMock));
-
-    prisma = {
-      branch: { findFirst: jest.fn() },
-      tenantCurrency: { findFirst: jest.fn() },
-      product: { findFirst: jest.fn() },
-      inventoryStock: { findFirst: jest.fn() },
-      $transaction: transactionFn,
+    tx = {
+      sale: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'sale-1', ...data })),
+      },
+      inventoryStock: { findFirst: jest.fn().mockResolvedValue({ id: 'stock-1', quantity: 10 }) },
+      $executeRaw: jest.fn().mockResolvedValue(1),
+      inventoryMovement: { create: jest.fn().mockResolvedValue({}) },
+      currency: { findUnique: jest.fn().mockResolvedValue({ code: 'COP' }) },
+      financialTransaction: { create: jest.fn().mockResolvedValue({}) },
+      client: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     };
 
-    // Reset tx mocks
-    Object.values(txMock).forEach((m) => {
-      if (typeof m === 'object' && m !== null) {
-        Object.values(m as Record<string, jest.Mock>).forEach((fn) => fn.mockReset());
-      }
-    });
+    prisma = {
+      branch: { findFirst: jest.fn().mockResolvedValue({ id: BRANCH_ID, isActive: true }) },
+      client: { findFirst: jest.fn().mockResolvedValue({ id: 'client-1' }) },
+      cashRegisterSession: { findFirst: jest.fn().mockResolvedValue({ branchId: BRANCH_ID }) },
+      tenantCurrency: { findFirst: jest.fn().mockResolvedValue({ currencyId: CURRENCY_ID }) },
+      product: { findMany: jest.fn().mockResolvedValue([makeProduct()]) },
+      inventoryStock: {
+        findMany: jest.fn().mockResolvedValue([{ productId: PRODUCT_ID, quantity: 10, reserved: 0 }]),
+      },
+      $transaction: jest.fn().mockImplementation(async (cb: (t: unknown) => unknown) => cb(tx)),
+    };
+    cashRegister = { addMovement: jest.fn().mockResolvedValue({}) };
+    cache = { invalidatePattern: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CreateSaleUseCase,
         { provide: PrismaService, useValue: prisma },
-        {
-          provide: CashRegisterUseCase,
-          useValue: { addMovement: jest.fn().mockResolvedValue(undefined) },
-        },
+        { provide: CashRegisterUseCase, useValue: cashRegister },
+        { provide: CacheService, useValue: cache },
       ],
     }).compile();
 
     useCase = module.get(CreateSaleUseCase);
-    cashRegisterUseCase = module.get(CashRegisterUseCase) as jest.Mocked<CashRegisterUseCase>;
   });
 
   describe('happy path', () => {
-    beforeEach(() => {
-      ((prisma['branch'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue({ id: BRANCH_ID });
-      ((prisma['product'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(makeProduct());
-      ((prisma['inventoryStock'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(makeStock());
+    it('creates a completed sale with correct totals', async () => {
+      const sale = await useCase.execute(makeDto(), TENANT_ID, USER_ID);
+      const data = tx.sale.create.mock.calls[0][0].data;
 
-      const product = makeProduct();
-      txMock.product.findFirst = jest.fn()
-        .mockResolvedValueOnce(product)   // line items loop
-        .mockResolvedValueOnce({ trackInventory: true, costPrice: 50 }); // inventory loop
-      txMock.sale.count = jest.fn().mockResolvedValue(0);
-      txMock.sale.findFirst = jest.fn().mockResolvedValue(null);
-      // null → no previous sale → generateSaleNumber produces V{year}-000001
-      txMock.inventoryStock.findFirst = jest.fn().mockResolvedValue(makeStock());
-      txMock.inventoryStock.updateMany = jest.fn().mockResolvedValue({ count: 1 });
-      // count: 1 → atomic update succeeded
-      txMock.inventoryStock.update = jest.fn().mockResolvedValue({});
-      txMock.inventoryMovement.create = jest.fn().mockResolvedValue({});
-      txMock.financialTransaction.create = jest.fn().mockResolvedValue({});
-      txMock.currency = { findUnique: jest.fn().mockResolvedValue({ code: 'COP' }) };
-      const createdSale = {
-        id: 'sale-1',
-        saleNumber: 'V2026-000001',
-        total: 200,
-        items: [],
-        payments: [],
-      };
-      txMock.sale.create = jest.fn().mockResolvedValue(createdSale);
+      expect(sale.id).toBe('sale-1');
+      expect(data).toMatchObject({ status: 'completed', subtotal: 200, taxAmount: 0, total: 200, amountPaid: 200, changeGiven: 0 });
+      expect(data.saleNumber).toMatch(/^V\d{4}-000001$/);
     });
 
-    it('creates a sale and returns it', async () => {
-      const result = await useCase.execute(makeDto(), TENANT_ID, USER_ID);
-      expect(result).toMatchObject({ id: 'sale-1', saleNumber: 'V2026-000001' });
-    });
-
-    it('creates an inventory movement for tracked products', async () => {
+    it('decrements stock atomically respecting reserved units and logs the movement', async () => {
       await useCase.execute(makeDto(), TENANT_ID, USER_ID);
-      expect(txMock.inventoryMovement.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ type: 'sale_out', quantity: 2, direction: -1 }),
-        }),
+
+      const [sql, ...params] = tx.$executeRaw.mock.calls[0];
+      expect((sql as string[]).join('?')).toContain('quantity - reserved >=');
+      expect(params).toContain(2);
+      expect(tx.inventoryMovement.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ type: 'sale_out', quantity: 2, stockBefore: 10, stockAfter: 8 }) }),
       );
     });
 
-    it('creates a financial transaction for the sale', async () => {
-      await useCase.execute(makeDto(), TENANT_ID, USER_ID);
-      expect(txMock.financialTransaction.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ type: 'income', referenceType: 'sale' }),
-        }),
+    it('records the income net of change given', async () => {
+      await useCase.execute(makeDto({ payments: [{ type: 'cash', amount: 250 }] }), TENANT_ID, USER_ID);
+      expect(tx.financialTransaction.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ type: 'income', amount: 200, currency: 'COP' }) }),
+      );
+      expect(tx.sale.create.mock.calls[0][0].data.changeGiven).toBe(50);
+    });
+
+    it('adds only net cash to the cash register, inside the same transaction', async () => {
+      await useCase.execute(
+        makeDto({ cashRegisterSessionId: 'session-1', payments: [{ type: 'cash', amount: 250 }] }),
+        TENANT_ID,
+        USER_ID,
+      );
+      expect(cashRegister.addMovement).toHaveBeenCalledWith(
+        'session-1', TENANT_ID, 'sale', 200, expect.any(String), USER_ID, 'sale', 'sale-1', tx,
       );
     });
 
-    it('updates client totalSales when clientId is provided', async () => {
-      txMock.client.update = jest.fn().mockResolvedValue({});
+    it('updates the client accumulated sales scoped to the tenant', async () => {
       await useCase.execute(makeDto({ clientId: 'client-1' }), TENANT_ID, USER_ID);
-      expect(txMock.client.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ totalSales: { increment: expect.any(Number) } }),
-        }),
+      expect(tx.client.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'client-1', tenantId: TENANT_ID } }),
       );
+    });
+
+    it('allows partial payment via credit and leaves no income for the credit part', async () => {
+      await useCase.execute(
+        makeDto({ payments: [{ type: 'cash', amount: 50 }, { type: 'credit', amount: 150 }] }),
+        TENANT_ID,
+        USER_ID,
+      );
+      expect(tx.financialTransaction.create.mock.calls[0][0].data.amount).toBe(50);
+    });
+
+    it('creates quotes without touching stock, finance or payments', async () => {
+      await useCase.execute(makeDto({ type: 'quote', payments: [] }), TENANT_ID, USER_ID);
+      const data = tx.sale.create.mock.calls[0][0].data;
+      expect(data.status).toBe('quote');
+      expect(data.saleNumber).toMatch(/^C\d{4}-/);
+      expect(tx.$executeRaw).not.toHaveBeenCalled();
+      expect(tx.financialTransaction.create).not.toHaveBeenCalled();
+    });
+
+    it('does not check or move stock for services (trackInventory=false)', async () => {
+      prisma.product.findMany.mockResolvedValue([makeProduct({ trackInventory: false })]);
+      await useCase.execute(makeDto(), TENANT_ID, USER_ID);
+      expect(prisma.inventoryStock.findMany).not.toHaveBeenCalled();
+      expect(tx.$executeRaw).not.toHaveBeenCalled();
+    });
+
+    it('invalidates stock and analytics caches', async () => {
+      await useCase.execute(makeDto(), TENANT_ID, USER_ID);
+      expect(cache.invalidatePattern).toHaveBeenCalledWith(`INV_STOCK:${TENANT_ID}:*`);
     });
   });
 
   describe('validation errors', () => {
-    it('throws NotFoundException when branch is not found', async () => {
-      ((prisma['branch'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(null);
-
-      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toThrow(
-        NotFoundException,
-      );
+    it('rejects an unknown branch', async () => {
+      prisma.branch.findFirst.mockResolvedValue(null);
+      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('throws BadRequestException when no currency is configured', async () => {
-      ((prisma['branch'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue({ id: BRANCH_ID });
-      // No currencyId in dto and no default currency
-      const dto = makeDto({ currencyId: undefined });
-      (prisma['tenantCurrency'] as unknown as Record<string, jest.Mock>).findFirst = jest.fn().mockResolvedValue(null);
-      // Need to re-provide prisma mock after mutating it
-      (prisma['tenantCurrency'] as unknown as { findFirst: jest.Mock }).findFirst = jest
-        .fn()
-        .mockResolvedValue(null);
+    it('rejects a client from another company', async () => {
+      prisma.client.findFirst.mockResolvedValue(null);
+      await expect(useCase.execute(makeDto({ clientId: 'foreign' }), TENANT_ID, USER_ID)).rejects.toThrow('Cliente no encontrado');
+    });
 
-      // Reset the module with updated mock
-      const module = await Test.createTestingModule({
-        providers: [
-          CreateSaleUseCase,
-          {
-            provide: PrismaService,
-            useValue: {
-              ...prisma,
-              tenantCurrency: { findFirst: jest.fn().mockResolvedValue(null) },
-            },
-          },
-          { provide: CashRegisterUseCase, useValue: { addMovement: jest.fn() } },
+    it('rejects a cash session that belongs to another branch', async () => {
+      prisma.cashRegisterSession.findFirst.mockResolvedValue({ branchId: 'other-branch' });
+      await expect(
+        useCase.execute(makeDto({ cashRegisterSessionId: 's' }), TENANT_ID, USER_ID),
+      ).rejects.toThrow(/otra sucursal/);
+    });
+
+    it('requires a default currency', async () => {
+      prisma.tenantCurrency.findFirst.mockResolvedValue(null);
+      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects unknown or inactive products', async () => {
+      prisma.product.findMany.mockResolvedValue([]);
+      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('rejects prices below the minimum sale price', async () => {
+      prisma.product.findMany.mockResolvedValue([makeProduct({ minSalePrice: 150 })]);
+      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toThrow(/mínimo permitido/);
+    });
+
+    it('rejects payments that do not cover the total', async () => {
+      await expect(
+        useCase.execute(makeDto({ payments: [{ type: 'cash', amount: 100 }] }), TENANT_ID, USER_ID),
+      ).rejects.toThrow(/no cubre el total/);
+    });
+
+    it('rejects a global discount larger than the total', async () => {
+      await expect(useCase.execute(makeDto({ globalDiscount: 500 }), TENANT_ID, USER_ID)).rejects.toThrow(/descuento global/);
+    });
+
+    it('rejects when available stock (minus reserved) is insufficient', async () => {
+      prisma.inventoryStock.findMany.mockResolvedValue([{ productId: PRODUCT_ID, quantity: 3, reserved: 2 }]);
+      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toThrow(/Stock insuficiente/);
+    });
+
+    it('aggregates repeated lines of the same product when checking stock', async () => {
+      prisma.inventoryStock.findMany.mockResolvedValue([{ productId: PRODUCT_ID, quantity: 3, reserved: 0 }]);
+      const dto = makeDto({
+        items: [
+          { productId: PRODUCT_ID, quantity: 2, unitPrice: 100 },
+          { productId: PRODUCT_ID, quantity: 2, unitPrice: 100 },
         ],
-      }).compile();
-
-      const uc = module.get(CreateSaleUseCase);
-      await expect(uc.execute(dto, TENANT_ID, USER_ID)).rejects.toThrow(BadRequestException);
-    });
-
-    it('throws NotFoundException when product is not found', async () => {
-      ((prisma['branch'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue({ id: BRANCH_ID });
-      ((prisma['product'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(null);
-
-      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toThrow(
-        NotFoundException,
-      );
-    });
-
-    it('throws BadRequestException when price is below minimum', async () => {
-      ((prisma['branch'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue({ id: BRANCH_ID });
-      ((prisma['product'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(
-        makeProduct({ minSalePrice: 500 }),
-      );
-
-      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toThrow(
-        BadRequestException,
-      );
-    });
-
-    it('throws BadRequestException when stock is insufficient', async () => {
-      ((prisma['branch'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue({ id: BRANCH_ID });
-      ((prisma['product'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(makeProduct());
-      ((prisma['inventoryStock'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(makeStock(1)); // only 1 in stock, need 2
-
-      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toThrow(
-        /Stock insuficiente/,
-      );
-    });
-
-    it('does not check stock for products with trackInventory=false', async () => {
-      ((prisma['branch'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue({ id: BRANCH_ID });
-      ((prisma['product'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(
-        makeProduct({ trackInventory: false }),
-      );
-
-      txMock.product.findFirst = jest.fn().mockResolvedValue({
-        name: 'Anillo', internalCode: 'AO-001', taxRate: 0, taxIncluded: false,
+        payments: [{ type: 'cash', amount: 400 }],
       });
-      txMock.sale.count = jest.fn().mockResolvedValue(0);
-      txMock.sale.findFirst = jest.fn().mockResolvedValue(null);
-      txMock.inventoryMovement.create = jest.fn().mockResolvedValue({});
-      txMock.financialTransaction.create = jest.fn().mockResolvedValue({});
-      txMock.sale.create = jest.fn().mockResolvedValue({ id: 'sale-1', total: 200, items: [], payments: [] });
-      txMock.currency = { findUnique: jest.fn().mockResolvedValue({ code: 'COP' }) };
+      await expect(useCase.execute(dto, TENANT_ID, USER_ID)).rejects.toThrow(/requerido: 4/);
+    });
 
-      const result = await useCase.execute(makeDto(), TENANT_ID, USER_ID);
-      expect(result).toBeDefined();
-      expect((prisma['inventoryStock'] as Record<string, jest.Mock>)['findFirst']).not.toHaveBeenCalled();
+    it('fails when stock changed concurrently inside the transaction', async () => {
+      tx.$executeRaw.mockResolvedValue(0);
+      await expect(useCase.execute(makeDto(), TENANT_ID, USER_ID)).rejects.toThrow(/otra operación/);
     });
   });
 
   describe('sale number generation', () => {
-    it('generates sequential sale numbers', async () => {
-      ((prisma['branch'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue({ id: BRANCH_ID });
-      ((prisma['product'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(makeProduct());
-      ((prisma['inventoryStock'] as Record<string, jest.Mock>)['findFirst']).mockResolvedValue(makeStock());
-
+    it('continues the yearly sequence', async () => {
       const year = new Date().getFullYear();
-      txMock.product.findFirst = jest.fn()
-        .mockResolvedValue({ name: 'P', internalCode: null, taxRate: 0, taxIncluded: false });
-      txMock.sale.findFirst = jest.fn().mockResolvedValue({ saleNumber: `V${year}-000099` });
-      // split('-')[1] = '000099' → parseInt = 99 → +1 = 100 → 'V{year}-000100'
-      txMock.inventoryStock.findFirst = jest.fn().mockResolvedValue(makeStock());
-      txMock.inventoryStock.updateMany = jest.fn().mockResolvedValue({ count: 1 });
-      txMock.inventoryStock.update = jest.fn().mockResolvedValue({});
-      txMock.inventoryMovement.create = jest.fn().mockResolvedValue({});
-      txMock.financialTransaction.create = jest.fn().mockResolvedValue({});
-      txMock.currency = { findUnique: jest.fn().mockResolvedValue({ code: 'COP' }) };
-      txMock.sale.create = jest.fn().mockImplementation(async ({ data }) => ({
-        id: 'sale-x', saleNumber: data.saleNumber, total: 200, items: [], payments: [],
-      }));
+      tx.sale.findFirst.mockResolvedValue({ saleNumber: `V${year}-000041` });
+      await useCase.execute(makeDto(), TENANT_ID, USER_ID);
+      expect(tx.sale.create.mock.calls[0][0].data.saleNumber).toBe(`V${year}-000042`);
+    });
 
-      const result = await useCase.execute(makeDto(), TENANT_ID, USER_ID);
-      expect(result.saleNumber).toBe(`V${year}-000100`);
+    it('retries when two cashiers get the same number', async () => {
+      const collision = new Prisma.PrismaClientKnownRequestError('dup', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: ['tenant_id', 'sale_number'] },
+      });
+      prisma.$transaction.mockRejectedValueOnce(collision);
+
+      const sale = await useCase.execute(makeDto(), TENANT_ID, USER_ID);
+      expect(sale.id).toBe('sale-1');
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
     });
   });
 });

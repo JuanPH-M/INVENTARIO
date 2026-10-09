@@ -32,11 +32,12 @@ describe('UpdateUserUseCase', () => {
     user: { findFirst: jest.Mock; update: jest.Mock };
     refreshToken: { updateMany: jest.Mock };
     role: { findFirst: jest.Mock };
-    userRole: { upsert: jest.Mock; deleteMany: jest.Mock };
+    userRole: { findFirst: jest.Mock; create: jest.Mock; update: jest.Mock; deleteMany: jest.Mock };
+    branch: { count: jest.Mock };
     permission: { findUnique: jest.Mock };
     userPermission: { upsert: jest.Mock };
   };
-  let cacheService: { invalidatePattern: jest.Mock };
+  let cacheService: { invalidatePattern: jest.Mock; del: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
@@ -47,13 +48,19 @@ describe('UpdateUserUseCase', () => {
       refreshToken: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       role: { findFirst: jest.fn() },
       userRole: {
-        upsert: jest.fn().mockResolvedValue({}),
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({}),
+        update: jest.fn().mockResolvedValue({}),
         deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
+      branch: { count: jest.fn().mockResolvedValue(1) },
       permission: { findUnique: jest.fn() },
       userPermission: { upsert: jest.fn().mockResolvedValue({}) },
     };
-    cacheService = { invalidatePattern: jest.fn().mockResolvedValue(undefined) };
+    cacheService = {
+      invalidatePattern: jest.fn().mockResolvedValue(undefined),
+      del: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -152,18 +159,46 @@ describe('UpdateUserUseCase', () => {
   });
 
   describe('assignRole', () => {
-    it('upserts the user role', async () => {
-      prisma.role.findFirst.mockResolvedValue({ id: 'role-1', slug: 'manager' });
+    it('creates the role assignment (global when no branch is given)', async () => {
+      prisma.role.findFirst.mockResolvedValue({ id: 'role-1', slug: 'manager', name: 'Gerente' });
 
-      await useCase.assignRole(
-        USER_ID,
-        TENANT_ID,
-        { roleId: 'role-1' },
-        makeRequester(),
-      );
+      await useCase.assignRole(USER_ID, TENANT_ID, { roleId: 'role-1' }, makeRequester());
 
-      expect(prisma.userRole.upsert).toHaveBeenCalled();
+      expect(prisma.userRole.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ userId: USER_ID, roleId: 'role-1', branchId: null }),
+      });
       expect(cacheService.invalidatePattern).toHaveBeenCalled();
+    });
+
+    it('updates the expiry when the assignment already exists', async () => {
+      prisma.role.findFirst.mockResolvedValue({ id: 'role-1', slug: 'manager', name: 'Gerente' });
+      prisma.userRole.findFirst.mockResolvedValue({ id: 'ur-1' });
+
+      await useCase.assignRole(USER_ID, TENANT_ID, { roleId: 'role-1', branchId: 'b-1' }, makeRequester());
+
+      expect(prisma.userRole.update).toHaveBeenCalledWith({ where: { id: 'ur-1' }, data: { expiresAt: null } });
+      expect(prisma.userRole.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects a branch from another company', async () => {
+      prisma.role.findFirst.mockResolvedValue({ id: 'role-1', slug: 'manager', name: 'Gerente' });
+      prisma.branch.count.mockResolvedValue(0);
+
+      await expect(
+        useCase.assignRole(USER_ID, TENANT_ID, { roleId: 'role-1', branchId: 'foreign' }, makeRequester()),
+      ).rejects.toThrow('La sucursal no existe');
+    });
+
+    it('lets a company admin grant the admin role but not super admin', async () => {
+      prisma.role.findFirst.mockResolvedValue({ id: 'role-ag', slug: 'admin_general', name: 'Admin' });
+      await expect(
+        useCase.assignRole(USER_ID, TENANT_ID, { roleId: 'role-ag' }, makeRequester(['admin_general'])),
+      ).resolves.not.toThrow();
+
+      prisma.role.findFirst.mockResolvedValue({ id: 'role-ag', slug: 'admin_general', name: 'Admin' });
+      await expect(
+        useCase.assignRole(USER_ID, TENANT_ID, { roleId: 'role-ag' }, makeRequester(['supervisor'])),
+      ).rejects.toThrow(ForbiddenException);
     });
 
     it('throws NotFoundException when role does not exist', async () => {

@@ -1,5 +1,6 @@
 'use client';
 
+import { confirm } from '@/components/common/confirm-dialog';
 import { useState, Fragment } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, ChevronRight, Pencil, Plus, Tag, Trash2, Package } from 'lucide-react';
@@ -188,7 +189,7 @@ export default function CategoriesPage() {
                             <Button
                               variant="ghost" size="icon"
                               className="h-8 w-8 text-destructive hover:text-destructive"
-                              onClick={() => { if (confirm(`¿Eliminar "${c.name}"?`)) deleteMutation.mutate(c.id); }}
+                              onClick={async () => { if (await confirm({ title: `¿Eliminar "${c.name}"?`, description: 'Esta acción no se puede deshacer.', destructive: true, confirmText: 'Confirmar' })) deleteMutation.mutate(c.id); }}
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>

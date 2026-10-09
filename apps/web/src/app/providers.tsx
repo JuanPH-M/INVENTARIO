@@ -4,58 +4,36 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { useEffect, type ReactNode } from 'react';
 import { queryClient } from '@/lib/query-client';
-import { useAuthStore } from '@/stores/auth.store';
 import { useUiStore } from '@/stores/ui.store';
+import { Toaster } from '@/components/ui/toaster';
+import { ConfirmDialogHost } from '@/components/common/confirm-dialog';
+import { CopyrightNotice } from '@/components/brand/copyright-notice';
 
-function ThemeProvider({ children }: { children: ReactNode }) {
+function ThemeSync() {
   const theme = useUiStore((s) => s.theme);
 
   useEffect(() => {
     const root = document.documentElement;
-    const applyTheme = (t: string) => {
-      if (t === 'dark') {
-        root.classList.add('dark');
-      } else if (t === 'light') {
-        root.classList.remove('dark');
-      } else {
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        root.classList.toggle('dark', prefersDark);
-      }
-    };
-
-    applyTheme(theme);
-
-    if (theme === 'system') {
-      const mq = window.matchMedia('(prefers-color-scheme: dark)');
-      const handler = (e: MediaQueryListEvent) => root.classList.toggle('dark', e.matches);
-      mq.addEventListener('change', handler);
-      return () => mq.removeEventListener('change', handler);
-    }
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const apply = () => root.classList.toggle('dark', theme === 'dark' || (theme === 'system' && mq.matches));
+    apply();
+    if (theme !== 'system') return;
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
   }, [theme]);
 
-  return <>{children}</>;
-}
-
-function AuthInitializer({ children }: { children: ReactNode }) {
-  const { isAuthenticated, fetchProfile } = useAuthStore();
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      fetchProfile();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated]);
-
-  return <>{children}</>;
+  return null;
 }
 
 export function Providers({ children }: { children: ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
-        <AuthInitializer>{children}</AuthInitializer>
-      </ThemeProvider>
-      {process.env.NODE_ENV === 'development' && <ReactQueryDevtools />}
+      <ThemeSync />
+      {children}
+      <Toaster />
+      <ConfirmDialogHost />
+      <CopyrightNotice />
+      {process.env.NODE_ENV === 'development' && <ReactQueryDevtools buttonPosition="bottom-left" />}
     </QueryClientProvider>
   );
 }

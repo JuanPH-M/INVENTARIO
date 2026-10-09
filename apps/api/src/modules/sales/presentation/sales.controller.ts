@@ -18,12 +18,12 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { IsBoolean, IsEnum, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { PERMISSIONS } from '@inventario/shared';
 import { CreateSaleUseCase } from '../application/use-cases/create-sale.use-case';
+import { VoidSaleUseCase } from '../application/use-cases/void-sale.use-case';
 import { PrismaService } from '../../../database/prisma.service';
 import { StorageService } from '../../../storage/storage.service';
 import { parsePaginationParams, paginate } from '../../../common/utils/pagination.util';
@@ -43,11 +43,12 @@ class AttachSaleDocumentDto {
 
 @ApiTags('Ventas')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('sales')
 export class SalesController {
   constructor(
     private readonly createSaleUseCase: CreateSaleUseCase,
+    private readonly voidSaleUseCase: VoidSaleUseCase,
     private readonly prisma: PrismaService,
     private readonly storageService: StorageService,
   ) {}
@@ -84,6 +85,10 @@ export class SalesController {
               { saleNumber: { contains: query.search, mode: 'insensitive' } },
               { customerName: { contains: query.search, mode: 'insensitive' } },
               { customerIdNum: { contains: query.search, mode: 'insensitive' } },
+              { client: { firstName: { contains: query.search, mode: 'insensitive' } } },
+              { client: { lastName: { contains: query.search, mode: 'insensitive' } } },
+              { client: { businessName: { contains: query.search, mode: 'insensitive' } } },
+              { client: { idNumber: { contains: query.search, mode: 'insensitive' } } },
             ],
           }
         : {}),
@@ -98,6 +103,7 @@ export class SalesController {
         include: {
           branch: { select: { name: true } },
           client: { select: { firstName: true, lastName: true, businessName: true } },
+          payments: { select: { type: true, amount: true } },
           _count: { select: { items: true } },
         },
       }),
@@ -282,73 +288,7 @@ export class SalesController {
     @Body() dto: VoidSaleDto,
     @CurrentUser() user: JwtPayload,
   ) {
-    const sale = await this.prisma.sale.findFirst({
-      where: { id, tenantId: user.tenantId, status: 'completed', ...(user.branchId ? { branchId: user.branchId } : {}) },
-      include: { items: true },
-    });
-    if (!sale) throw new NotFoundException('Venta no encontrada o no se puede anular');
-
-    const hoursSinceCreation = (Date.now() - new Date(sale.createdAt).getTime()) / (1000 * 60 * 60);
-    if (hoursSinceCreation > 24) {
-      throw new BadRequestException('Solo se pueden anular ventas de las últimas 24 horas');
-    }
-
-    return this.prisma.$transaction(async (tx) => {
-      await tx.sale.update({
-        where: { id },
-        data: {
-          status: 'voided',
-          voidedById: user.sub,
-          voidedAt: new Date(),
-          voidReason: dto.reason,
-        },
-      });
-
-      const productIds = sale.items.map((i) => i.productId);
-      const existingStocks = await tx.inventoryStock.findMany({
-        where: { tenantId: user.tenantId, branchId: sale.branchId, productId: { in: productIds } },
-      });
-      const stockMap = new Map(existingStocks.map((s) => [s.productId, s]));
-
-      for (const item of sale.items) {
-        let stock = stockMap.get(item.productId);
-        const stockBefore = Number(stock?.quantity ?? 0);
-        const newQty = stockBefore + Number(item.quantity);
-
-        if (!stock) {
-          stock = await tx.inventoryStock.create({
-            data: {
-              tenantId: user.tenantId,
-              productId: item.productId,
-              branchId: sale.branchId,
-              quantity: newQty,
-              reserved: 0,
-            },
-          });
-        } else {
-          await tx.inventoryStock.update({ where: { id: stock.id }, data: { quantity: newQty } });
-        }
-
-        await tx.inventoryMovement.create({
-          data: {
-            tenantId: user.tenantId,
-            productId: item.productId,
-            branchId: sale.branchId,
-            type: 'return_in',
-            quantity: Number(item.quantity),
-            direction: 1,
-            stockBefore,
-            stockAfter: newQty,
-            referenceType: 'sale_void',
-            referenceId: id,
-            notes: `Anulación de venta #${sale.saleNumber}: ${dto.reason}`,
-            performedById: user.sub,
-          },
-        });
-      }
-
-      return tx.sale.findFirst({ where: { id }, include: { items: true } });
-    });
+    return this.voidSaleUseCase.execute(id, user.tenantId, user.sub, dto.reason, user.branchId);
   }
 
 }

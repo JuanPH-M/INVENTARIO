@@ -6,9 +6,8 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf .next out",
+    "clean": "node -e \"require('fs').rmSync('.next',{recursive:true,force:true})\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage"

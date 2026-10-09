@@ -1,0 +1,37 @@
+Inventario Pro — Licencia de software propietario
+Copyright (c) 2026 JuanPH-M. Todos los derechos reservados.
+
+Este software, incluido su código fuente, diseño, interfaces, documentación y demás
+materiales que acompañan este repositorio (en adelante, "el Software"), es propiedad
+exclusiva de JuanPH-M (https://github.com/JuanPH-M) y está protegido por las leyes de
+derechos de autor y los tratados internacionales aplicables.
+
+1. PUBLICACIÓN SOLO PARA CONSULTA
+   El código se publica únicamente para fines de consulta y evaluación. Que el
+   repositorio sea visible públicamente NO concede ninguna licencia de uso.
+
+2. RESTRICCIONES
+   Sin autorización previa y por escrito del titular, queda prohibido:
+   a) usar el Software con fines comerciales o en producción, total o parcialmente;
+   b) copiar, modificar, adaptar, traducir o crear obras derivadas;
+   c) distribuir, sublicenciar, vender, alquilar, prestar u ofrecer el Software como
+      servicio (SaaS) a terceros;
+   d) eliminar, ocultar o alterar los avisos de derechos de autor, la marca
+      "© JuanPH-M. Todos los derechos reservados." mostrada en la interfaz, la cabecera
+      HTTP X-Copyright o cualquier otra indicación de titularidad.
+
+3. LICENCIAS COMERCIALES
+   Las empresas interesadas en implementar el Software (por ejemplo, en una o varias
+   sedes) pueden solicitar una licencia de uso al titular a través de su perfil de
+   GitHub: https://github.com/JuanPH-M
+
+4. SIN GARANTÍA
+   EL SOFTWARE SE PROPORCIONA "TAL CUAL", SIN GARANTÍA DE NINGÚN TIPO. EN NINGÚN CASO
+   EL TITULAR SERÁ RESPONSABLE POR DAÑOS DERIVADOS DEL USO O LA IMPOSIBILIDAD DE USO
+   DEL SOFTWARE.
+
+5. COMPONENTES DE TERCEROS
+   Las librerías de código abierto utilizadas conservan sus propias licencias, que se
+   encuentran en sus respectivos paquetes.
+
+Cualquier uso no autorizado podrá dar lugar a las acciones legales correspondientes.

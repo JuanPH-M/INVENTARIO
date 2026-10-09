@@ -16,13 +16,12 @@ import {
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { PERMISSIONS } from '@inventario/shared';
 import { ProductsUseCase } from '../application/use-cases/products.use-case';
-import { StorageService } from '../../../storage/storage.service';
+import { IMAGE_MIME_TYPES, StorageService } from '../../../storage/storage.service';
 import { PrismaService } from '../../../database/prisma.service';
 import {
   CreateProductDto,
@@ -36,7 +35,7 @@ const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 @ApiTags('Productos')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('products')
 export class ProductsController {
   constructor(
@@ -50,6 +49,53 @@ export class ProductsController {
   @ApiOperation({ summary: 'Listar productos con filtros y paginación' })
   async findAll(@CurrentUser() user: JwtPayload, @Query() query: GetProductsQueryDto) {
     return this.productsUseCase.findMany(user.tenantId, query);
+  }
+
+  @Get('catalog')
+  @RequirePermissions(PERMISSIONS.PRODUCTS_READ)
+  @ApiOperation({
+    summary: 'Catálogo liviano de productos activos con disponibilidad por sede (para POS y selectores)',
+  })
+  async catalog(@CurrentUser() user: JwtPayload, @Query('branchId') branchId?: string) {
+    const products = await this.prisma.product.findMany({
+      where: { tenantId: user.tenantId, deletedAt: null, status: 'active' },
+      orderBy: { name: 'asc' },
+      take: 5000,
+      select: {
+        id: true,
+        name: true,
+        internalCode: true,
+        barcode: true,
+        sku: true,
+        brand: true,
+        salePrice: true,
+        costPrice: true,
+        minSalePrice: true,
+        taxRate: true,
+        taxIncluded: true,
+        trackInventory: true,
+        unitOfMeasure: true,
+        images: true,
+        category: { select: { id: true, name: true } },
+        inventoryStock: {
+          where: branchId ? { branchId } : undefined,
+          select: { branchId: true, quantity: true, reserved: true },
+        },
+      },
+    });
+    return products.map(({ inventoryStock, images, ...p }) => {
+      const available = inventoryStock.reduce((s, st) => s + Number(st.quantity) - Number(st.reserved ?? 0), 0);
+      const imgs = Array.isArray(images) ? (images as Array<{ url?: string; isPrimary?: boolean }>) : [];
+      return {
+        ...p,
+        salePrice: Number(p.salePrice),
+        costPrice: Number(p.costPrice),
+        minSalePrice: Number(p.minSalePrice),
+        taxRate: Number(p.taxRate),
+        available,
+        imageUrl: (imgs.find((i) => i.isPrimary) ?? imgs[0])?.url ?? null,
+      };
+    });
   }
 
   @Get(':id')
@@ -129,10 +175,11 @@ export class ProductsController {
       tenantId: user.tenantId,
       module: 'products',
       entityId: id,
+      allowedMimeTypes: IMAGE_MIME_TYPES,
     });
 
     const newImages = uploaded.map((u, i) => ({
-      url: u.url,
+      url: this.storageService.publicUrl(u.key),
       order: existingImages.length + i,
       isPrimary: existingImages.length === 0 && i === 0,
       caption: '',

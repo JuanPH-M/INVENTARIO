@@ -58,6 +58,11 @@ export class CreateUserDto {
   @ApiProperty({ description: 'ID del rol a asignar al usuario' })
   @IsUUID()
   roleId!: string;
+
+  @ApiPropertyOptional({ description: 'Sucursal a la que aplica el rol (vacío = todas las sedes)' })
+  @IsOptional()
+  @IsUUID()
+  branchId?: string;
 }
 
 export class UpdateUserDto extends PartialType(CreateUserDto) {

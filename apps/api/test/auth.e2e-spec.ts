@@ -1,186 +1,80 @@
-import { INestApplication } from '@nestjs/common';
-import * as request from 'supertest';
-import { Test, TestingModule } from '@nestjs/testing';
-import { AppModule } from '../src/app.module';
-import { PrismaService } from '../src/database/prisma.service';
-import { JwtService } from '@nestjs/jwt';
-import { ValidationPipe } from '@nestjs/common';
-import * as argon2 from 'argon2';
+import type { INestApplication } from '@nestjs/common';
+import request from 'supertest';
+import { ADMIN, SELLER, auth, createTestApp, login } from './helpers/app.helper';
 
-/**
- * Auth E2E tests — these run against the real app stack.
- *
- * Prerequisites:
- *  - TEST_DATABASE_URL pointing to a test/staging database
- *  - Redis reachable at TEST_REDIS_URL (or default localhost:6379/1)
- *
- * Run with: pnpm test:e2e (from apps/api)
- */
+describe('Autenticación (e2e)', () => {
+  let app: INestApplication;
 
-let app: INestApplication;
-let prisma: PrismaService;
-let tenantId: string;
-let userId: string;
-let validToken: string;
-
-const TEST_EMAIL = `e2e-auth-${Date.now()}@inventario.test`;
-const TEST_PASSWORD = 'E2E-SecurePass123!';
-
-beforeAll(async () => {
-  const moduleFixture: TestingModule = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
-
-  app = moduleFixture.createNestApplication();
-  app.setGlobalPrefix('api');
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
-  await app.init();
-
-  prisma = app.get(PrismaService);
-  const jwtService = app.get(JwtService);
-
-  // Seed minimal tenant + user for auth tests
-  const plan = await prisma.plan.findFirst() ?? await prisma.plan.create({
-    data: { name: 'E2E Plan', slug: `e2e-plan-${Date.now()}`, maxUsers: -1, maxBranches: -1, maxProducts: -1 },
+  beforeAll(async () => {
+    app = await createTestApp();
   });
 
-  const tenant = await prisma.tenant.create({
-    data: {
-      name: `E2E Auth Tenant ${Date.now()}`,
-      slug: `e2e-auth-${Date.now()}`,
-      planId: plan.id,
-      status: 'active',
-    },
+  afterAll(async () => {
+    await app.close();
   });
-  tenantId = tenant.id;
 
-  const passwordHash = await argon2.hash(TEST_PASSWORD, { type: argon2.argon2id });
-  const user = await prisma.user.create({
-    data: {
-      tenantId,
-      email: TEST_EMAIL,
-      passwordHash,
-      firstName: 'E2E',
-      lastName: 'Test',
-      status: 'active',
-      language: 'es',
-      timezone: 'America/Bogota',
-      emailVerifiedAt: new Date(),
-    },
-  });
-  userId = user.id;
-
-  validToken = jwtService.sign({
-    sub: userId,
-    tenantId,
-    branchId: null,
-    roles: ['admin_general'],
-    sessionId: 'e2e-session',
-    email: TEST_EMAIL,
-  });
-});
-
-afterAll(async () => {
-  // Clean up test data in reverse dependency order
-  await prisma.refreshToken.deleteMany({ where: { userId } }).catch(() => {});
-  await prisma.user.deleteMany({ where: { tenantId } }).catch(() => {});
-  await prisma.tenant.deleteMany({ where: { id: tenantId } }).catch(() => {});
-  await app.close();
-});
-
-// ─── POST /api/auth/login ────────────────────────────────────────────────────
-
-describe('POST /api/auth/login', () => {
-  it('returns access and refresh tokens on valid credentials', async () => {
+  it('rechaza credenciales inválidas con un mensaje genérico', async () => {
     const res = await request(app.getHttpServer())
       .post('/api/auth/login')
-      .send({ email: TEST_EMAIL, password: TEST_PASSWORD })
-      .expect(200);
-
-    expect(res.body.data).toMatchObject({
-      accessToken: expect.any(String),
-      refreshToken: expect.any(String),
-      tokenType: 'Bearer',
-    });
-  });
-
-  it('returns 401 for wrong password', async () => {
-    await request(app.getHttpServer())
-      .post('/api/auth/login')
-      .send({ email: TEST_EMAIL, password: 'WrongPass999' })
+      .send({ email: ADMIN.email, password: 'incorrecta' })
       .expect(401);
+    expect(res.body).toMatchObject({ success: false, statusCode: 401, message: 'Credenciales inválidas' });
   });
 
-  it('returns 401 for non-existent email', async () => {
-    await request(app.getHttpServer())
-      .post('/api/auth/login')
-      .send({ email: 'nobody@inventario.test', password: 'whatever' })
-      .expect(401);
+  it('devuelve 422 con detalle por campo cuando el cuerpo es inválido', async () => {
+    const res = await request(app.getHttpServer()).post('/api/auth/login').send({ email: 'no-es-email' }).expect(422);
+    expect(res.body.errors).toHaveProperty('email');
+    expect(res.body.errors).toHaveProperty('password');
   });
 
-  it('returns 400 for missing password', async () => {
-    await request(app.getHttpServer())
-      .post('/api/auth/login')
-      .send({ email: TEST_EMAIL })
-      .expect(400);
+  it('emite access token y refresh token en cookie HttpOnly limitada a /api/auth', async () => {
+    const res = await request(app.getHttpServer()).post('/api/auth/login').send(ADMIN).expect(200);
+    expect(res.body.data.accessToken).toEqual(expect.any(String));
+    expect(res.body.data.refreshToken).toBeUndefined();
+    const cookie = ([] as string[]).concat(res.headers['set-cookie'] ?? []).join(';');
+    expect(cookie).toMatch(/refresh_token=/);
+    expect(cookie).toMatch(/HttpOnly/i);
+    expect(cookie).toMatch(/Path=\/api\/auth/);
+    expect(res.headers['x-copyright']).toMatch(/Todos los derechos reservados/);
   });
 
-  it('returns 400 for invalid email format', async () => {
-    await request(app.getHttpServer())
-      .post('/api/auth/login')
-      .send({ email: 'not-an-email', password: 'pass' })
-      .expect(400);
-  });
-});
-
-// ─── GET /api/auth/me ────────────────────────────────────────────────────────
-
-describe('GET /api/auth/me', () => {
-  it('returns user profile with valid token', async () => {
-    const res = await request(app.getHttpServer())
-      .get('/api/auth/me')
-      .set('Authorization', `Bearer ${validToken}`)
-      .expect(200);
-
-    expect(res.body.data ?? res.body).toMatchObject({
-      id: userId,
-    });
+  it('exige autenticación en rutas protegidas', async () => {
+    await request(app.getHttpServer()).get('/api/products').expect(401);
   });
 
-  it('returns 401 without token', async () => {
-    await request(app.getHttpServer()).get('/api/auth/me').expect(401);
+  it('devuelve el perfil con permisos efectivos', async () => {
+    const { token } = await login(app, ADMIN);
+    const res = await request(app.getHttpServer()).get('/api/auth/me').set(auth(token)).expect(200);
+    expect(res.body.data.email).toBe(ADMIN.email);
+    expect(res.body.data.permissions).toEqual(expect.arrayContaining(['sales:create', 'users:read']));
   });
 
-  it('returns 401 with malformed token', async () => {
-    await request(app.getHttpServer())
-      .get('/api/auth/me')
-      .set('Authorization', 'Bearer not-a-valid-jwt')
-      .expect(401);
+  it('renueva la sesión con la cookie y detecta la reutilización del token rotado', async () => {
+    const { cookie } = await login(app, ADMIN);
+
+    const first = await request(app.getHttpServer()).post('/api/auth/refresh').set('Cookie', cookie).expect(200);
+    expect(first.body.data.accessToken).toEqual(expect.any(String));
+
+    // Reutilizar el mismo token justo después: periodo de gracia (pestañas concurrentes), no se cierran sesiones
+    const reused = await request(app.getHttpServer()).post('/api/auth/refresh').set('Cookie', cookie).expect(401);
+    expect(reused.body.message).toBe('Sesión ya renovada');
   });
-});
 
-// ─── POST /api/auth/logout ───────────────────────────────────────────────────
-
-describe('POST /api/auth/logout', () => {
-  it('logs out and invalidates the session', async () => {
-    // First login to get a fresh token
-    const loginRes = await request(app.getHttpServer())
-      .post('/api/auth/login')
-      .send({ email: TEST_EMAIL, password: TEST_PASSWORD });
-
-    const token = loginRes.body.data?.accessToken ?? loginRes.body.accessToken;
-
-    await request(app.getHttpServer())
-      .post('/api/auth/logout')
-      .set('Authorization', `Bearer ${token}`)
-      .expect(200);
+  it('invalida el access token al cerrar sesión', async () => {
+    const { token, cookie } = await login(app, ADMIN);
+    await request(app.getHttpServer()).post('/api/auth/logout').set(auth(token)).set('Cookie', cookie).expect(204);
+    await request(app.getHttpServer()).get('/api/auth/me').set(auth(token)).expect(401);
+    await request(app.getHttpServer()).post('/api/auth/refresh').set('Cookie', cookie).expect(401);
   });
-});
 
-// ─── Health check ─────────────────────────────────────────────────────────────
+  it('aplica permisos por rol (un vendedor no administra usuarios)', async () => {
+    const { token } = await login(app, SELLER);
+    await request(app.getHttpServer()).get('/api/users').set(auth(token)).expect(403);
+    await request(app.getHttpServer()).get('/api/products/catalog').set(auth(token)).expect(200);
+  });
 
-describe('GET /health', () => {
-  it('returns 200 without authentication', async () => {
-    await request(app.getHttpServer()).get('/health').expect(200);
+  it('impide que un administrador de empresa use rutas de la plataforma', async () => {
+    const { token } = await login(app, ADMIN);
+    await request(app.getHttpServer()).get('/api/companies').set(auth(token)).expect(403);
   });
 });

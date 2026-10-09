@@ -13,7 +13,6 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
@@ -33,7 +32,7 @@ import type { JwtPayload } from '@inventario/types';
 
 @ApiTags('Usuarios')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('users')
 export class UsersController {
   constructor(
@@ -69,7 +68,7 @@ export class UsersController {
     @Body() dto: CreateUserDto,
     @CurrentUser() user: JwtPayload,
   ) {
-    return this.createUser.execute(dto, user.tenantId, user.sub);
+    return this.createUser.execute(dto, user.tenantId, user.sub, user.roles);
   }
 
   @Patch(':id')

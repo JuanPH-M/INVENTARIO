@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { PurchaseUseCase } from './purchase.use-case';
 import { PrismaService } from '../../../../database/prisma.service';
+import { CacheService } from '../../../../cache/cache.service';
 
 const TENANT_ID = 'tenant-1';
 const BRANCH_ID = 'branch-1';
@@ -17,15 +18,7 @@ function makeOrderDto(overrides = {}) {
     branchId: BRANCH_ID,
     supplierId: SUPPLIER_ID,
     currencyId: CURRENCY_ID,
-    items: [
-      {
-        productId: PRODUCT_ID,
-        quantityOrdered: 10,
-        unitCost: 50,
-        taxRate: 0.19,
-        discountRate: 0,
-      },
-    ],
+    items: [{ productId: PRODUCT_ID, quantityOrdered: 10, unitCost: 50, taxRate: 0.19, discountRate: 0 }],
     ...overrides,
   };
 }
@@ -36,249 +29,176 @@ function makeOrder(overrides = {}) {
     branchId: BRANCH_ID,
     tenantId: TENANT_ID,
     status: 'sent',
-    items: [
-      {
-        id: ITEM_ID,
-        productId: PRODUCT_ID,
-        quantityOrdered: 10,
-        quantityReceived: 0,
-        unitCost: 50,
-      },
-    ],
+    items: [{ id: ITEM_ID, productId: PRODUCT_ID, quantityOrdered: 10, quantityReceived: 0, unitCost: 50 }],
     ...overrides,
   };
 }
 
 describe('PurchaseUseCase', () => {
   let useCase: PurchaseUseCase;
-  let prisma: Record<string, unknown>;
-
-  const txMock = {
-    purchaseOrderItem: { update: jest.fn(), findMany: jest.fn() },
-    inventoryStock: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
-    inventoryMovement: { createMany: jest.fn() },
-    purchaseOrder: { update: jest.fn() },
-  };
+  let prisma: Record<string, any>;
+  let tx: Record<string, any>;
+  let cache: { invalidatePattern: jest.Mock };
 
   beforeEach(async () => {
-    Object.values(txMock).forEach((m) =>
-      Object.values(m as Record<string, jest.Mock>).forEach((fn) => fn.mockReset()),
-    );
+    tx = {
+      purchaseOrder: {
+        findFirst: jest.fn().mockResolvedValue(makeOrder()),
+        update: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: ORDER_ID, ...data })),
+      },
+      purchaseOrderItem: { findMany: jest.fn().mockResolvedValue([{ quantityOrdered: 10, quantityReceived: 10 }]) },
+      $executeRaw: jest.fn().mockResolvedValue(1),
+      inventoryStock: {
+        findUnique: jest.fn().mockResolvedValue({ quantity: 5 }),
+        upsert: jest.fn().mockResolvedValue({ quantity: 15 }),
+      },
+      inventoryMovement: { create: jest.fn().mockResolvedValue({}) },
+      product: {
+        findUnique: jest.fn().mockResolvedValue({ costPrice: 40, inventoryStock: [{ quantity: 15 }] }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+    };
 
     prisma = {
-      tenantCurrency: { findFirst: jest.fn() },
+      branch: { count: jest.fn().mockResolvedValue(1) },
+      supplier: { count: jest.fn().mockResolvedValue(1) },
+      product: { count: jest.fn().mockResolvedValue(1) },
+      client: { count: jest.fn().mockResolvedValue(1) },
+      tenantCurrency: { findFirst: jest.fn().mockResolvedValue({ currencyId: CURRENCY_ID }) },
       purchaseOrder: {
-        create: jest.fn(),
-        count: jest.fn().mockResolvedValue(0),
-        findFirst: jest.fn(),
+        create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: ORDER_ID, ...data })),
+        findFirst: jest.fn().mockResolvedValue(null),
         findMany: jest.fn(),
-        update: jest.fn(),
+        count: jest.fn(),
       },
-      inventoryStock: { findMany: jest.fn() },
-      $transaction: jest.fn().mockImplementation(async (cb) => cb(txMock)),
+      $transaction: jest.fn().mockImplementation(async (cb: (t: unknown) => unknown) => cb(tx)),
     };
+    cache = { invalidatePattern: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PurchaseUseCase,
         { provide: PrismaService, useValue: prisma },
+        { provide: CacheService, useValue: cache },
       ],
     }).compile();
 
     useCase = module.get(PurchaseUseCase);
   });
 
-  // ─── create ──────────────────────────────────────────────────────────────────
-
   describe('create', () => {
-    it('creates a purchase order with draft status', async () => {
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).create.mockResolvedValue({
-        id: ORDER_ID,
-        orderNumber: 'OC2026-000001',
-        status: 'draft',
-        items: [],
-        supplier: { name: 'Proveedor Test' },
-      });
-
-      const result = await useCase.create(makeOrderDto(), TENANT_ID, USER_ID);
-
-      expect(result.status).toBe('draft');
-      expect((prisma['purchaseOrder'] as Record<string, jest.Mock>).create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ status: 'draft', tenantId: TENANT_ID }),
-        }),
-      );
+    it('creates a draft purchase order with correct totals', async () => {
+      const order = await useCase.create(makeOrderDto(), TENANT_ID, USER_ID);
+      expect(order).toMatchObject({ status: 'draft', subtotal: 500, taxAmount: 95, total: 595 });
     });
 
-    it('throws BadRequestException when no currency is configured', async () => {
-      (prisma['tenantCurrency'] as Record<string, jest.Mock>).findFirst.mockResolvedValue(null);
-      const dto = makeOrderDto({ currencyId: undefined });
-
-      await expect(useCase.create(dto, TENANT_ID, USER_ID)).rejects.toThrow(BadRequestException);
-    });
-
-    it('calculates subtotal, tax and total correctly', async () => {
-      let capturedData: Record<string, unknown> = {};
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).create.mockImplementation(
-        async ({ data }) => { capturedData = data; return { ...data, id: ORDER_ID, items: [], supplier: {} }; },
-      );
-
-      await useCase.create(
-        makeOrderDto({ items: [{ productId: PRODUCT_ID, quantityOrdered: 10, unitCost: 100, taxRate: 0.19, discountRate: 0 }] }),
+    it('applies the discount before tax', async () => {
+      const order = await useCase.create(
+        makeOrderDto({ items: [{ productId: PRODUCT_ID, quantityOrdered: 10, unitCost: 100, taxRate: 0.19, discountRate: 0.1 }] }),
         TENANT_ID,
         USER_ID,
       );
-
-      // 10 * 100 = 1000 net, tax = 1000 * 0.19 = 190, total = 1190
-      expect(capturedData['subtotal']).toBeCloseTo(1000, 2);
-      expect(capturedData['taxAmount']).toBeCloseTo(190, 2);
-      expect(capturedData['total']).toBeCloseTo(1190, 2);
+      expect(order).toMatchObject({ subtotal: 900, taxAmount: 171, total: 1071 });
     });
 
-    it('applies discount before tax', async () => {
-      let capturedData: Record<string, unknown> = {};
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).create.mockImplementation(
-        async ({ data }) => { capturedData = data; return { ...data, id: ORDER_ID, items: [], supplier: {} }; },
-      );
-
-      await useCase.create(
-        makeOrderDto({
-          items: [{ productId: PRODUCT_ID, quantityOrdered: 10, unitCost: 100, taxRate: 0.10, discountRate: 0.10 }],
-        }),
-        TENANT_ID,
-        USER_ID,
-      );
-
-      // gross = 1000, discount = 100, net = 900, tax = 90, total = 990
-      expect(capturedData['subtotal']).toBeCloseTo(900, 2);
-      expect(capturedData['taxAmount']).toBeCloseTo(90, 2);
-    });
-
-    it('generates order number with correct format', async () => {
-      let capturedData: Record<string, unknown> = {};
+    it('generates the next yearly order number', async () => {
       const year = new Date().getFullYear();
-      // findFirst returns last order → split('-')[1]='000042' → parseInt=42 → +1=43 → 'OC{year}-000043'
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).findFirst.mockResolvedValue({ orderNumber: `OC${year}-000042` });
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).create.mockImplementation(
-        async ({ data }) => { capturedData = data; return { ...data, id: ORDER_ID, items: [], supplier: {} }; },
-      );
+      prisma.purchaseOrder.findFirst.mockResolvedValue({ orderNumber: `OC${year}-000009` });
+      const order = await useCase.create(makeOrderDto(), TENANT_ID, USER_ID);
+      expect(order.orderNumber).toBe(`OC${year}-000010`);
+    });
 
-      await useCase.create(makeOrderDto(), TENANT_ID, USER_ID);
+    it('requires a currency', async () => {
+      prisma.tenantCurrency.findFirst.mockResolvedValue(null);
+      await expect(useCase.create(makeOrderDto({ currencyId: undefined }), TENANT_ID, USER_ID)).rejects.toBeInstanceOf(BadRequestException);
+    });
 
-      expect(capturedData['orderNumber']).toBe(`OC${year}-000043`);
+    it('rejects an empty order', async () => {
+      await expect(useCase.create(makeOrderDto({ items: [] }), TENANT_ID, USER_ID)).rejects.toThrow(/al menos un producto/);
+    });
+
+    it.each([
+      ['branch', 'Sucursal no encontrada'],
+      ['supplier', 'Proveedor no encontrado'],
+      ['product', 'Uno o más productos no existen'],
+    ])('rejects a %s from another company', async (model, message) => {
+      prisma[model].count.mockResolvedValue(0);
+      await expect(useCase.create(makeOrderDto(), TENANT_ID, USER_ID)).rejects.toThrow(message);
     });
   });
 
-  // ─── receiveItems ─────────────────────────────────────────────────────────────
-
   describe('receiveItems', () => {
-    const receiveDto = {
-      items: [{ purchaseOrderItemId: ITEM_ID, quantityReceived: 5 }],
-    };
+    const receiveDto = { items: [{ purchaseOrderItemId: ITEM_ID, quantityReceived: 10 }] };
 
-    it('throws NotFoundException when order is not found or already received', async () => {
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).findFirst.mockResolvedValue(null);
-
-      await expect(
-        useCase.receiveItems(ORDER_ID, TENANT_ID, receiveDto, USER_ID),
-      ).rejects.toThrow(NotFoundException);
+    it('fails when the order is missing or already received', async () => {
+      tx.purchaseOrder.findFirst.mockResolvedValue(null);
+      await expect(useCase.receiveItems(ORDER_ID, TENANT_ID, receiveDto, USER_ID)).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('throws BadRequestException when receiving more than ordered', async () => {
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).findFirst.mockResolvedValue(
-        makeOrder({ items: [{ id: ITEM_ID, productId: PRODUCT_ID, quantityOrdered: 3, quantityReceived: 0, unitCost: 50 }] }),
+    it('rejects items from another order', async () => {
+      await expect(
+        useCase.receiveItems(ORDER_ID, TENANT_ID, { items: [{ purchaseOrderItemId: 'x', quantityReceived: 1 }] }, USER_ID),
+      ).rejects.toThrow(/no pertenece/);
+    });
+
+    it('never receives more than ordered (conditional update)', async () => {
+      tx.$executeRaw.mockResolvedValue(0);
+      await expect(useCase.receiveItems(ORDER_ID, TENANT_ID, receiveDto, USER_ID)).rejects.toThrow(/más de lo pedido/);
+    });
+
+    it('increments stock atomically and logs the movement', async () => {
+      await useCase.receiveItems(ORDER_ID, TENANT_ID, receiveDto, USER_ID);
+
+      expect(tx.inventoryStock.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({ update: expect.objectContaining({ quantity: { increment: 10 } }) }),
       );
-      (prisma['inventoryStock'] as Record<string, jest.Mock>).findMany.mockResolvedValue([]);
-
-      await expect(
-        useCase.receiveItems(ORDER_ID, TENANT_ID, { items: [{ purchaseOrderItemId: ITEM_ID, quantityReceived: 5 }] }, USER_ID),
-      ).rejects.toThrow(BadRequestException);
+      expect(tx.inventoryMovement.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ type: 'purchase_in', quantity: 10, stockBefore: 5, stockAfter: 15 }),
+        }),
+      );
+      expect(cache.invalidatePattern).toHaveBeenCalledWith(`INV_STOCK:${TENANT_ID}:*`);
     });
 
-    it('creates inventory stock and movements when receiving items', async () => {
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).findFirst.mockResolvedValue(makeOrder());
-      (prisma['inventoryStock'] as Record<string, jest.Mock>).findMany.mockResolvedValue([]);
+    it('updates the weighted average cost', async () => {
+      await useCase.receiveItems(ORDER_ID, TENANT_ID, receiveDto, USER_ID);
+      // (5 und × 40 + 10 und × 50) / 15 = 46.6667
+      expect(tx.product.update).toHaveBeenCalledWith({ where: { id: PRODUCT_ID }, data: { costPrice: 46.6667 } });
+    });
 
-      txMock.inventoryStock.findFirst.mockResolvedValue(null);
-      txMock.inventoryStock.create.mockResolvedValue({ id: 'stock-new', quantity: 5 });
-      txMock.purchaseOrderItem.update.mockResolvedValue({});
-      txMock.inventoryMovement.createMany.mockResolvedValue({});
-      txMock.purchaseOrderItem.findMany.mockResolvedValue([
-        { quantityOrdered: 10, quantityReceived: 5 },
-      ]);
-      txMock.purchaseOrder.update.mockResolvedValue({ id: ORDER_ID, status: 'partial_received', items: [] });
-
+    it('marks the order as received when everything arrived', async () => {
       const result = await useCase.receiveItems(ORDER_ID, TENANT_ID, receiveDto, USER_ID);
+      expect(result.status).toBe('received');
+    });
 
-      expect(txMock.inventoryMovement.createMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.arrayContaining([
-            expect.objectContaining({ type: 'purchase_in', quantity: 5, direction: 1 }),
-          ]),
-        }),
+    it('marks the order as partially received otherwise', async () => {
+      tx.purchaseOrderItem.findMany.mockResolvedValue([{ quantityOrdered: 10, quantityReceived: 4 }]);
+      const result = await useCase.receiveItems(
+        ORDER_ID, TENANT_ID, { items: [{ purchaseOrderItemId: ITEM_ID, quantityReceived: 4 }] }, USER_ID,
       );
       expect(result.status).toBe('partial_received');
     });
-
-    it('sets status to received when all items are fully received', async () => {
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).findFirst.mockResolvedValue(makeOrder());
-      (prisma['inventoryStock'] as Record<string, jest.Mock>).findMany.mockResolvedValue([
-        { id: 'stock-1', productId: PRODUCT_ID, quantity: 0 },
-      ]);
-
-      txMock.inventoryStock.findFirst.mockResolvedValue({ id: 'stock-1', quantity: 0 });
-      txMock.inventoryStock.update.mockResolvedValue({});
-      txMock.purchaseOrderItem.update.mockResolvedValue({});
-      txMock.inventoryMovement.createMany.mockResolvedValue({});
-      txMock.purchaseOrderItem.findMany.mockResolvedValue([
-        { quantityOrdered: 10, quantityReceived: 10 }, // fully received
-      ]);
-      txMock.purchaseOrder.update.mockResolvedValue({ id: ORDER_ID, status: 'received', items: [] });
-
-      const result = await useCase.receiveItems(
-        ORDER_ID,
-        TENANT_ID,
-        { items: [{ purchaseOrderItemId: ITEM_ID, quantityReceived: 10 }] },
-        USER_ID,
-      );
-
-      expect(result.status).toBe('received');
-    });
   });
 
-  // ─── createWithRetry ──────────────────────────────────────────────────────────
-
   describe('createWithRetry', () => {
-    it('retries on P2002 unique constraint violation and succeeds', async () => {
-      const p2002 = Object.assign(new Error('Unique constraint'), { code: 'P2002' });
-      const success = { id: ORDER_ID, status: 'draft', items: [], supplier: {} };
-
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).create
-        .mockRejectedValueOnce(p2002)
-        .mockRejectedValueOnce(p2002)
-        .mockResolvedValue(success);
-
-      const result = await useCase.createWithRetry(makeOrderDto(), TENANT_ID, USER_ID);
-      expect(result).toMatchObject({ id: ORDER_ID });
-      expect((prisma['purchaseOrder'] as Record<string, jest.Mock>).create).toHaveBeenCalledTimes(3);
+    it('retries on P2002 and succeeds', async () => {
+      const spy = jest
+        .spyOn(useCase, 'create')
+        .mockRejectedValueOnce({ code: 'P2002' })
+        .mockResolvedValueOnce({ id: ORDER_ID } as never);
+      await expect(useCase.createWithRetry(makeOrderDto(), TENANT_ID, USER_ID)).resolves.toEqual({ id: ORDER_ID });
+      expect(spy).toHaveBeenCalledTimes(2);
     });
 
-    it('throws after 5 failed attempts', async () => {
-      const p2002 = Object.assign(new Error('Unique constraint'), { code: 'P2002' });
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).create.mockRejectedValue(p2002);
-
-      await expect(useCase.createWithRetry(makeOrderDto(), TENANT_ID, USER_ID)).rejects.toThrow();
-      expect((prisma['purchaseOrder'] as Record<string, jest.Mock>).create).toHaveBeenCalledTimes(5);
+    it('gives up after 5 attempts', async () => {
+      jest.spyOn(useCase, 'create').mockRejectedValue({ code: 'P2002' });
+      await expect(useCase.createWithRetry(makeOrderDto(), TENANT_ID, USER_ID)).rejects.toEqual({ code: 'P2002' });
     });
 
-    it('rethrows non-P2002 errors immediately', async () => {
-      const genericError = new Error('DB connection failed');
-      (prisma['purchaseOrder'] as Record<string, jest.Mock>).create.mockRejectedValue(genericError);
-
-      await expect(useCase.createWithRetry(makeOrderDto(), TENANT_ID, USER_ID)).rejects.toThrow(
-        'DB connection failed',
-      );
-      expect((prisma['purchaseOrder'] as Record<string, jest.Mock>).create).toHaveBeenCalledTimes(1);
+    it('rethrows other errors immediately', async () => {
+      const spy = jest.spyOn(useCase, 'create').mockRejectedValue(new Error('boom'));
+      await expect(useCase.createWithRetry(makeOrderDto(), TENANT_ID, USER_ID)).rejects.toThrow('boom');
+      expect(spy).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -1,23 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
 import { useAuthStore } from './auth.store';
 import * as apiModule from '@/lib/api-client';
 
-// Mock the api client module
+let memoryToken: string | null = null;
+
 vi.mock('@/lib/api-client', () => ({
-  apiClient: {
-    post: vi.fn(),
-    get: vi.fn(),
-  },
-  setMemoryAccessToken: vi.fn(),
-  getMemoryAccessToken: vi.fn(() => null),
+  apiClient: { post: vi.fn(), get: vi.fn() },
+  setMemoryAccessToken: vi.fn((t: string | null) => {
+    memoryToken = t;
+  }),
+  getMemoryAccessToken: vi.fn(() => memoryToken),
+  refreshAccessToken: vi.fn(),
+  onSessionExpired: vi.fn(),
 }));
 
-// Helper to get the mocked functions
-function getMocks() {
-  const client = apiModule.apiClient as unknown as { post: ReturnType<typeof vi.fn>; get: ReturnType<typeof vi.fn> };
-  return client;
-}
+const api = apiModule as unknown as {
+  apiClient: { post: ReturnType<typeof vi.fn>; get: ReturnType<typeof vi.fn> };
+  refreshAccessToken: ReturnType<typeof vi.fn>;
+  setMemoryAccessToken: ReturnType<typeof vi.fn>;
+};
 
 const mockUser = {
   id: 'user-1',
@@ -34,158 +35,104 @@ const mockUser = {
 describe('useAuthStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: false });
-    localStorage.clear();
+    memoryToken = null;
+    useAuthStore.setState({ user: null, status: 'idle', isAuthenticated: false, isLoading: false, logoutReason: null });
   });
 
   describe('login', () => {
-    it('stores access token in memory and sets authenticated on successful login', async () => {
-      getMocks().post.mockResolvedValue({
-        data: {
-          accessToken: 'access-token-123',
-          expiresIn: 900,
-          tokenType: 'Bearer',
-        },
-      });
-      getMocks().get.mockResolvedValue({ data: { data: mockUser } });
+    it('stores the access token in memory and loads the profile', async () => {
+      api.apiClient.post.mockResolvedValueOnce({ data: { data: { accessToken: 'tok-1' } } });
+      api.apiClient.get.mockResolvedValueOnce({ data: { data: mockUser } });
 
-      const { result } = renderHook(() => useAuthStore());
+      const result = await useAuthStore.getState().login('admin@test.com', 'Secret123');
 
-      await act(async () => {
-        const res = await result.current.login('admin@test.com', 'password');
-        expect(res.requiresMfa).toBe(false);
-      });
-
-      expect(result.current.isAuthenticated).toBe(true);
-      expect(result.current.user).toMatchObject({ email: 'admin@test.com' });
+      expect(result).toEqual({ requiresMfa: false });
+      expect(api.setMemoryAccessToken).toHaveBeenCalledWith('tok-1');
+      expect(useAuthStore.getState().status).toBe('authenticated');
+      expect(useAuthStore.getState().user?.email).toBe('admin@test.com');
     });
 
-    it('returns requiresMfa=true when MFA is needed', async () => {
-      getMocks().post.mockResolvedValue({
-        data: {
-          requiresMfa: true,
-          mfaToken: 'mfa-temp-token',
-        },
-      });
+    it('sends the company code when provided', async () => {
+      api.apiClient.post.mockResolvedValueOnce({ data: { data: { accessToken: 'tok' } } });
+      api.apiClient.get.mockResolvedValueOnce({ data: { data: mockUser } });
 
-      const { result } = renderHook(() => useAuthStore());
-
-      let response: { requiresMfa: boolean; mfaToken?: string } = { requiresMfa: false };
-      await act(async () => {
-        response = await result.current.login('admin@test.com', 'password');
-      });
-
-      expect(response.requiresMfa).toBe(true);
-      expect(response.mfaToken).toBe('mfa-temp-token');
-      expect(result.current.isAuthenticated).toBe(false);
+      await useAuthStore.getState().login('a@b.com', 'x', 'acme');
+      expect(api.apiClient.post).toHaveBeenCalledWith('/auth/login', { email: 'a@b.com', password: 'x', tenantSlug: 'acme' });
     });
 
-    it('sets isLoading to false even if login throws', async () => {
-      getMocks().post.mockRejectedValue(new Error('Network error'));
+    it('returns the MFA token without authenticating when MFA is required', async () => {
+      api.apiClient.post.mockResolvedValueOnce({ data: { data: { requiresMfa: true, mfaToken: 'mfa-1' } } });
 
-      const { result } = renderHook(() => useAuthStore());
+      const result = await useAuthStore.getState().login('a@b.com', 'x');
 
-      await act(async () => {
-        await result.current.login('admin@test.com', 'bad-pass').catch(() => {});
-      });
+      expect(result).toEqual({ requiresMfa: true, mfaToken: 'mfa-1' });
+      expect(api.apiClient.get).not.toHaveBeenCalled();
+      expect(useAuthStore.getState().status).not.toBe('authenticated');
+    });
 
-      expect(result.current.isLoading).toBe(false);
-      expect(result.current.isAuthenticated).toBe(false);
+    it('propagates API errors and resets the loading flag', async () => {
+      api.apiClient.post.mockRejectedValueOnce(new Error('401'));
+      await expect(useAuthStore.getState().login('a@b.com', 'bad')).rejects.toThrow('401');
+      expect(useAuthStore.getState().isLoading).toBe(false);
+    });
+  });
+
+  describe('verifyMfa', () => {
+    it('stores the token and loads the profile', async () => {
+      api.apiClient.post.mockResolvedValueOnce({ data: { data: { accessToken: 'tok-mfa' } } });
+      api.apiClient.get.mockResolvedValueOnce({ data: { data: mockUser } });
+
+      await useAuthStore.getState().verifyMfa('123456', 'mfa-1');
+
+      expect(api.apiClient.post).toHaveBeenCalledWith('/auth/mfa/verify', { code: '123456', mfaToken: 'mfa-1' });
+      expect(useAuthStore.getState().status).toBe('authenticated');
+    });
+  });
+
+  describe('bootstrap', () => {
+    it('restores the session from the refresh cookie', async () => {
+      api.refreshAccessToken.mockResolvedValueOnce('tok-refreshed');
+      api.apiClient.get.mockResolvedValueOnce({ data: { data: mockUser } });
+
+      await expect(useAuthStore.getState().bootstrap()).resolves.toBe(true);
+      expect(useAuthStore.getState().status).toBe('authenticated');
+    });
+
+    it('marks the session as anonymous when there is no valid cookie', async () => {
+      api.refreshAccessToken.mockResolvedValueOnce(null);
+
+      await expect(useAuthStore.getState().bootstrap()).resolves.toBe(false);
+      expect(useAuthStore.getState().status).toBe('anonymous');
+      expect(api.apiClient.get).not.toHaveBeenCalled();
     });
   });
 
   describe('logout', () => {
-    it('clears user state on logout', async () => {
-      useAuthStore.setState({ user: mockUser, isAuthenticated: true });
+    it('calls the API and clears the session even if the request fails', async () => {
+      memoryToken = 'tok';
+      useAuthStore.setState({ user: mockUser, status: 'authenticated', isAuthenticated: true });
+      api.apiClient.post.mockRejectedValueOnce(new Error('network'));
 
-      getMocks().post.mockResolvedValue({ data: {} });
+      await useAuthStore.getState().logout();
 
-      const { result } = renderHook(() => useAuthStore());
-
-      await act(async () => {
-        await result.current.logout();
-      });
-
-      expect(result.current.user).toBeNull();
-      expect(result.current.isAuthenticated).toBe(false);
-    });
-
-    it('clears local state even if API call fails', async () => {
-      useAuthStore.setState({ user: mockUser, isAuthenticated: true });
-      const mockFn = vi.fn().mockRejectedValue(new Error('Server error'));
-      (apiModule.apiClient as unknown as { post: ReturnType<typeof vi.fn> }).post = mockFn;
-
-      const { result } = renderHook(() => useAuthStore());
-
-      // The store's logout uses try/finally so it always clears state
-      await act(async () => {
-        try {
-          await result.current.logout();
-        } catch {
-          // expected — store swallows it but re-throws if needed
-        }
-      });
-
-      expect(result.current.user).toBeNull();
-      expect(result.current.isAuthenticated).toBe(false);
+      expect(api.apiClient.post).toHaveBeenCalledWith('/auth/logout');
+      expect(useAuthStore.getState().user).toBeNull();
+      expect(useAuthStore.getState().status).toBe('anonymous');
+      expect(api.setMemoryAccessToken).toHaveBeenCalledWith(null);
     });
   });
 
-  describe('hasPermission', () => {
-    it('returns true when user has the permission', () => {
-      useAuthStore.setState({
-        user: { ...mockUser, permissions: ['sales:create', 'inventory:read'] },
-        isAuthenticated: true,
-      });
-
-      const { result } = renderHook(() => useAuthStore());
-      expect(result.current.hasPermission('sales:create')).toBe(true);
+  describe('permissions', () => {
+    it('checks single and any-of permissions', () => {
+      useAuthStore.setState({ user: mockUser });
+      const s = useAuthStore.getState();
+      expect(s.hasPermission('sales:read')).toBe(true);
+      expect(s.hasPermission('users:delete')).toBe(false);
+      expect(s.hasAnyPermission(['users:delete', 'sales:create'])).toBe(true);
     });
 
-    it('returns false when user does not have the permission', () => {
-      useAuthStore.setState({
-        user: { ...mockUser, permissions: ['sales:read'] },
-        isAuthenticated: true,
-      });
-
-      const { result } = renderHook(() => useAuthStore());
-      expect(result.current.hasPermission('admin:delete')).toBe(false);
-    });
-
-    it('returns false when user is null', () => {
-      useAuthStore.setState({ user: null, isAuthenticated: false });
-
-      const { result } = renderHook(() => useAuthStore());
-      expect(result.current.hasPermission('any:permission')).toBe(false);
-    });
-  });
-
-  describe('fetchProfile', () => {
-    it('sets user on successful fetch', async () => {
-      getMocks().get.mockResolvedValue({ data: { data: mockUser } });
-
-      const { result } = renderHook(() => useAuthStore());
-
-      await act(async () => {
-        await result.current.fetchProfile();
-      });
-
-      expect(result.current.user).toMatchObject(mockUser);
-      expect(result.current.isAuthenticated).toBe(true);
-    });
-
-    it('clears user on fetch failure', async () => {
-      useAuthStore.setState({ user: mockUser, isAuthenticated: true });
-      getMocks().get.mockRejectedValue(new Error('Unauthorized'));
-
-      const { result } = renderHook(() => useAuthStore());
-
-      await act(async () => {
-        await result.current.fetchProfile();
-      });
-
-      expect(result.current.user).toBeNull();
-      expect(result.current.isAuthenticated).toBe(false);
+    it('returns false without a user', () => {
+      expect(useAuthStore.getState().hasPermission('sales:read')).toBe(false);
     });
   });
 });

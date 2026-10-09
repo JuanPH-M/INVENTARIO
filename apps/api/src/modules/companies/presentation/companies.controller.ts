@@ -13,7 +13,6 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { Roles } from '../../../common/decorators/roles.decorator';
@@ -27,7 +26,7 @@ import type { JwtPayload } from '@inventario/types';
 
 @ApiTags('Empresas')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('companies')
 export class CompaniesController {
   constructor(
@@ -144,6 +143,7 @@ export class CompaniesController {
       where: { id },
       data: { status: 'suspended' },
     });
+    await this.cacheService.invalidatePattern('userstate:*');
   }
 
   @Patch(':id/activate')
@@ -155,5 +155,6 @@ export class CompaniesController {
       where: { id },
       data: { status: 'active' },
     });
+    await this.cacheService.invalidatePattern('userstate:*');
   }
 }

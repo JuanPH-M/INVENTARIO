@@ -4,6 +4,7 @@ import {
   IsOptional,
   IsString,
   Length,
+  Matches,
   MaxLength,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -21,6 +22,16 @@ export class LoginDto {
   @IsNotEmpty({ message: 'La contraseña es requerida' })
   @MaxLength(200)
   password!: string;
+
+  @ApiPropertyOptional({
+    example: 'mi-empresa',
+    description: 'Código de la empresa. Solo es necesario si el mismo email existe en varias empresas.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  @Transform(({ value }: { value: string }) => value?.trim().toLowerCase() || undefined)
+  tenantSlug?: string;
 
   @ApiPropertyOptional({ example: 'Chrome/Windows' })
   @IsOptional()
@@ -80,9 +91,12 @@ export class ResetPasswordDto {
   @IsNotEmpty()
   token!: string;
 
-  @ApiProperty({ minLength: 8 })
+  @ApiProperty({ minLength: 8, description: 'Mínimo 8 caracteres, con mayúscula, minúscula y número' })
   @IsString()
   @Length(8, 200)
+  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).+$/, {
+    message: 'La contraseña debe tener al menos una mayúscula, una minúscula y un número',
+  })
   newPassword!: string;
 }
 
@@ -92,9 +106,12 @@ export class ChangePasswordDto {
   @IsNotEmpty()
   currentPassword!: string;
 
-  @ApiProperty({ minLength: 8 })
+  @ApiProperty({ minLength: 8, description: 'Mínimo 8 caracteres, con mayúscula, minúscula y número' })
   @IsString()
   @Length(8, 200)
+  @Matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).+$/, {
+    message: 'La contraseña debe tener al menos una mayúscula, una minúscula y un número',
+  })
   newPassword!: string;
 }
 

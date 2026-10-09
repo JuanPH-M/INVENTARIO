@@ -1,30 +1,24 @@
-import {
-  Injectable,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../../../database/prisma.service';
-import { CacheService } from '../../../../cache/cache.service';
 import { LoginUseCase } from './login.use-case';
 import type { TokenResponse } from '@inventario/types';
+
+/**
+ * Ventana en la que reutilizar un refresh token recién rotado NO se considera robo.
+ * Cubre el caso de dos pestañas que refrescan casi al mismo tiempo.
+ */
+const ROTATION_GRACE_MS = 30_000;
 
 @Injectable()
 export class RefreshTokenUseCase {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly cacheService: CacheService,
     private readonly loginUseCase: LoginUseCase,
   ) {}
 
-  async execute(
-    rawToken: string,
-    ipAddress: string,
-    userAgent: string,
-  ): Promise<TokenResponse> {
-    const tokenHash = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
+  async execute(rawToken: string, ipAddress: string, userAgent: string): Promise<TokenResponse> {
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
     const stored = await this.prisma.refreshToken.findFirst({
       where: { tokenHash },
@@ -41,41 +35,44 @@ export class RefreshTokenUseCase {
       },
     });
 
-    if (!stored) {
-      throw new UnauthorizedException('Refresh token inválido');
-    }
+    if (!stored) throw new UnauthorizedException('Sesión inválida');
 
     if (stored.revokedAt) {
+      const revokedAgo = Date.now() - stored.revokedAt.getTime();
+      if (stored.revokedBy === 'rotation' && revokedAgo < ROTATION_GRACE_MS) {
+        throw new UnauthorizedException('Sesión ya renovada');
+      }
+      // Reutilización de un token revocado: posible robo → cerrar todas las sesiones
       await this.prisma.refreshToken.updateMany({
         where: { userId: stored.userId, revokedAt: null },
-        data: { revokedAt: new Date() },
+        data: { revokedAt: new Date(), revokedBy: 'reuse_detected' },
       });
-      throw new UnauthorizedException(
-        'Token robado detectado. Todas las sesiones han sido cerradas',
-      );
+      throw new UnauthorizedException('Sesión revocada. Inicia sesión de nuevo');
     }
 
-    if (stored.expiresAt < new Date()) {
-      throw new UnauthorizedException('Refresh token expirado');
+    if (stored.expiresAt < new Date()) throw new UnauthorizedException('Sesión expirada');
+
+    const { user } = stored;
+    if (user.deletedAt || user.status !== 'active' || user.tenant.status !== 'active') {
+      throw new UnauthorizedException('Cuenta no disponible');
     }
 
-    if (stored.user.status !== 'active') {
-      throw new UnauthorizedException(`Cuenta ${stored.user.status}`);
-    }
-
-    await this.prisma.refreshToken.update({
-      where: { id: stored.id },
-      data: { revokedAt: new Date() },
+    // Rotación atómica: solo una petición concurrente puede consumir el token
+    const consumed = await this.prisma.refreshToken.updateMany({
+      where: { id: stored.id, revokedAt: null },
+      data: { revokedAt: new Date(), revokedBy: 'rotation' },
     });
+    if (consumed.count === 0) throw new UnauthorizedException('Sesión ya renovada');
 
-    const roles = stored.user.userRoles.map((ur) => ur.role.slug);
+    const roles = user.userRoles.map((ur) => ur.role.slug);
     return this.loginUseCase.generateTokens(
       stored.userId,
-      stored.user.tenant.id,
+      user.tenant.id,
       null,
       roles,
       userAgent,
       ipAddress,
+      user.email,
     );
   }
 }

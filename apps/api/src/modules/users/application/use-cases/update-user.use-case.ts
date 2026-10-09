@@ -7,11 +7,11 @@ import * as argon2 from 'argon2';
 import { PrismaService } from '../../../../database/prisma.service';
 import { CacheService } from '../../../../cache/cache.service';
 import { CACHE_KEYS } from '../../../../cache/cache-keys.constant';
+import { assertAssignableRole, assertBranchOfTenant } from '../role-policy';
 import type { UpdateUserDto, AssignRoleDto, RemoveRoleDto, OverridePermissionDto } from '../dtos/user.dto';
 import type { JwtPayload } from '@inventario/types';
 
 // Roles that only super_admin can assign
-const RESTRICTED_ROLE_SLUGS = ['super_admin', 'admin_general'];
 
 @Injectable()
 export class UpdateUserUseCase {
@@ -23,7 +23,8 @@ export class UpdateUserUseCase {
   async update(userId: string, tenantId: string, dto: UpdateUserDto) {
     await this.assertUserExists(userId, tenantId);
 
-    const { password, ...rest } = dto as UpdateUserDto & { password?: string };
+    // roleId / branchId se gestionan con assignRole/removeRole, no con una actualización directa
+    const { password, roleId: _roleId, branchId: _branchId, ...rest } = dto as UpdateUserDto & { password?: string };
     const updateData: Record<string, unknown> = { ...rest };
     if (password) {
       updateData['passwordHash'] = await argon2.hash(password, { type: argon2.argon2id });
@@ -90,37 +91,21 @@ export class UpdateUserUseCase {
   async assignRole(userId: string, tenantId: string, dto: AssignRoleDto, requester: JwtPayload) {
     await this.assertUserExists(userId, tenantId);
 
-    const role = await this.prisma.role.findFirst({
-      where: {
-        id: dto.roleId,
-        OR: [{ tenantId }, { tenantId: null }],
-      },
-    });
-    if (!role) throw new NotFoundException('Rol no encontrado');
+    await assertAssignableRole(this.prisma, dto.roleId, tenantId, requester.roles);
+    await assertBranchOfTenant(this.prisma, dto.branchId, tenantId);
 
-    // Only super_admin can assign privileged system roles
-    if (RESTRICTED_ROLE_SLUGS.includes(role.slug) && !requester.roles.includes('super_admin')) {
-      throw new ForbiddenException('Solo el super administrador puede asignar este rol');
+    const existing = await this.prisma.userRole.findFirst({
+      where: { userId, roleId: dto.roleId, branchId: dto.branchId ?? null },
+      select: { id: true },
+    });
+    const expiresAt = dto.expiresAt ? new Date(dto.expiresAt) : null;
+    if (existing) {
+      await this.prisma.userRole.update({ where: { id: existing.id }, data: { expiresAt } });
+    } else {
+      await this.prisma.userRole.create({
+        data: { userId, roleId: dto.roleId, branchId: dto.branchId ?? null, expiresAt, assignedBy: requester.sub },
+      });
     }
-
-    await this.prisma.userRole.upsert({
-      where: {
-        userId_roleId_branchId: {
-          userId,
-          roleId: dto.roleId,
-          branchId: dto.branchId ?? (null as unknown as string),
-        },
-      },
-      update: {
-        expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
-      },
-      create: {
-        userId,
-        roleId: dto.roleId,
-        branchId: dto.branchId,
-        expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
-      },
-    });
 
     await this.invalidatePermissionsCache(userId);
   }
@@ -140,6 +125,7 @@ export class UpdateUserUseCase {
       where: { slug: dto.permissionSlug },
     });
     if (!permission) throw new NotFoundException('Permiso no encontrado');
+    await assertBranchOfTenant(this.prisma, dto.branchId, tenantId);
 
     // Prevent privilege escalation: requester can only grant permissions they themselves hold,
     // unless they are super_admin
@@ -219,8 +205,10 @@ export class UpdateUserUseCase {
   }
 
   private async invalidatePermissionsCache(userId: string): Promise<void> {
-    await this.cacheService.invalidatePattern(
-      CACHE_KEYS.USER_PERMISSIONS_PATTERN(userId),
-    );
+    await Promise.all([
+      this.cacheService.invalidatePattern(CACHE_KEYS.USER_PERMISSIONS_PATTERN(userId)),
+      // Estado cacheado por JwtStrategy: la suspensión surte efecto de inmediato
+      this.cacheService.del(`userstate:${userId}`),
+    ]);
   }
 }

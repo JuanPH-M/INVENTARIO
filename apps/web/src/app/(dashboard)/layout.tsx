@@ -1,35 +1,44 @@
 'use client';
 
 import { useEffect } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
-import { Toaster } from '@/components/ui/toaster';
+import { CommandPalette } from '@/components/layout/command-palette';
+import { LoadingScreen } from '@/components/common/loading-screen';
 import { useAuthStore } from '@/stores/auth.store';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { isAuthenticated, user, fetchProfile } = useAuthStore();
+  const status = useAuthStore((s) => s.status);
+  const bootstrap = useAuthStore((s) => s.bootstrap);
 
   useEffect(() => {
-    if (!isAuthenticated) {
-      router.replace('/login');
-      return;
+    if (status === 'idle') void bootstrap();
+  }, [status, bootstrap]);
+
+  useEffect(() => {
+    if (status === 'anonymous') {
+      const next = pathname && pathname !== '/dashboard' ? `?next=${encodeURIComponent(pathname)}` : '';
+      router.replace(`/login${next}`);
     }
-    if (!user) {
-      fetchProfile();
-    }
-  }, [isAuthenticated, user, fetchProfile, router]);
+  }, [status, pathname, router]);
+
+  if (status !== 'authenticated') {
+    return <LoadingScreen label={status === 'anonymous' ? 'Redirigiendo al inicio de sesión...' : 'Cargando tu espacio de trabajo...'} />;
+  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       <Sidebar />
-      <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <Header />
-        <main key={pathname} className="flex-1 overflow-auto p-4 md:p-6 animate-page-in">{children}</main>
+        <main key={pathname} className="animate-page-in flex-1 overflow-y-auto">
+          <div className="mx-auto w-full max-w-[1440px] px-4 pb-14 pt-6 md:px-6 lg:px-8">{children}</div>
+        </main>
       </div>
-      <Toaster />
+      <CommandPalette />
     </div>
   );
 }

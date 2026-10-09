@@ -9,8 +9,11 @@ import { MfaUseCase } from './application/use-cases/mfa.use-case';
 import { ForgotPasswordUseCase } from './application/use-cases/forgot-password.use-case';
 import { ChangePasswordUseCase } from './application/use-cases/change-password.use-case';
 import { UpdateProfileUseCase } from './application/use-cases/update-profile.use-case';
+import { GetProfileUseCase } from './application/use-cases/get-profile.use-case';
 import { JwtStrategy } from './infrastructure/strategies/jwt.strategy';
 import { AuthController } from './presentation/auth.controller';
+
+type DurationString = `${number}${'s' | 'm' | 'h' | 'd'}`;
 
 @Module({
   imports: [
@@ -21,15 +24,19 @@ import { AuthController } from './presentation/auth.controller';
       useFactory: (config: ConfigService) => {
         const privateKey = config.get<string>('jwt.privateKey');
         const publicKey = config.get<string>('jwt.publicKey');
-        const expiresIn = (config.get<string>('jwt.expiresIn') ?? '15m') as `${number}${'s'|'m'|'h'|'d'}`;
+        const expiresIn = (config.get<string>('jwt.expiresIn') ?? '15m') as DurationString;
         const env = config.get<string>('app.nodeEnv') ?? 'development';
+
         if (privateKey && publicKey) {
           return { privateKey, publicKey, signOptions: { algorithm: 'RS256' as const, expiresIn } };
         }
         if (env !== 'development' && env !== 'test') {
-          throw new Error('JWT_PRIVATE_KEY y JWT_PUBLIC_KEY son requeridas en producción');
+          throw new Error('JWT_PRIVATE_KEY y JWT_PUBLIC_KEY son obligatorias fuera de desarrollo');
         }
-        return { secret: config.get<string>('jwt.refreshTokenSecret') ?? 'dev-secret', signOptions: { expiresIn } };
+        return {
+          secret: config.get<string>('jwt.devSecret'),
+          signOptions: { algorithm: 'HS256' as const, expiresIn },
+        };
       },
     }),
   ],
@@ -42,8 +49,9 @@ import { AuthController } from './presentation/auth.controller';
     ForgotPasswordUseCase,
     ChangePasswordUseCase,
     UpdateProfileUseCase,
+    GetProfileUseCase,
     JwtStrategy,
   ],
-  exports: [LoginUseCase, JwtModule, PassportModule],
+  exports: [LoginUseCase, LogoutUseCase, JwtModule, PassportModule],
 })
 export class AuthModule {}

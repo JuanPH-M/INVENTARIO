@@ -1,254 +1,295 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
-import { Bell, Menu, Moon, Search, Sun } from 'lucide-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useUiStore } from '@/stores/ui.store';
+import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import { usePathname, useRouter } from 'next/navigation';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Bell, Building2, CheckCheck, ChevronDown, LogOut, Menu, Monitor, Moon, Search, Sun, UserRound } from 'lucide-react';
+import { useUiStore, type Theme } from '@/stores/ui.store';
+import { useAuthStore } from '@/stores/auth.store';
 import { apiClient } from '@/lib/api-client';
+import { useBranches } from '@/hooks/use-branches';
+import { findNavItem } from '@/config/navigation';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-
-const SEARCH_ROUTES: { path: string; label: string }[] = [
-  { path: '/dashboard/products', label: 'Productos' },
-  { path: '/dashboard/users', label: 'Usuarios' },
-  { path: '/dashboard/clients', label: 'Clientes' },
-  { path: '/dashboard/suppliers', label: 'Proveedores' },
-  { path: '/dashboard/sales', label: 'Ventas' },
-  { path: '/dashboard/purchases', label: 'Compras' },
-  { path: '/dashboard/inventory', label: 'Inventario' },
-  { path: '/dashboard/branches', label: 'Sucursales' },
-  { path: '/dashboard/categories', label: 'Categorías' },
-  { path: '/dashboard/finance', label: 'Transacciones' },
-  { path: '/dashboard/reports', label: 'Reportes' },
-  { path: '/dashboard/incidents', label: 'Incidencias' },
-  { path: '/dashboard/ai', label: 'Inteligencia Artificial' },
-];
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { cn, formatRelativeTime, getInitials } from '@/lib/utils';
 
 type Notification = {
   id: string;
   title: string;
-  body?: string;
+  body?: string | null;
   status: 'read' | 'unread';
+  priority?: string;
   sentAt: string;
 };
 
-export function Header({ title }: { title?: string }) {
-  const { setSidebarOpen, theme, setTheme } = useUiStore();
-  const router = useRouter();
-  const pathname = usePathname();
+const THEMES: { value: Theme; label: string; icon: React.ElementType }[] = [
+  { value: 'light', label: 'Claro', icon: Sun },
+  { value: 'dark', label: 'Oscuro', icon: Moon },
+  { value: 'system', label: 'Sistema', icon: Monitor },
+];
+
+function BranchSelector() {
+  const { data: branches = [] } = useBranches();
+  const branchId = useUiStore((s) => s.branchId);
+  const setBranchId = useUiStore((s) => s.setBranchId);
+
+  // Si la sede guardada ya no existe, vuelve a "todas"
+  useEffect(() => {
+    if (branchId && branches.length > 0 && !branches.some((b) => b.id === branchId)) setBranchId('');
+  }, [branchId, branches, setBranchId]);
+
+  if (branches.length < 2) return null;
+  const current = branches.find((b) => b.id === branchId);
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="hidden max-w-[220px] gap-2 md:inline-flex">
+          <Building2 className="text-muted-foreground" />
+          <span className="truncate">{current?.name ?? 'Todas las sedes'}</span>
+          <ChevronDown className="text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-60">
+        <DropdownMenuLabel>Filtrar por sede</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => setBranchId('')} className={cn(!branchId && 'font-semibold text-primary')}>
+          Todas las sedes
+        </DropdownMenuItem>
+        {branches.map((b) => (
+          <DropdownMenuItem key={b.id} onClick={() => setBranchId(b.id)} className={cn(b.id === branchId && 'font-semibold text-primary')}>
+            <span className="truncate">{b.name}</span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function NotificationsMenu() {
   const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
 
-  // Search state
-  const [query, setQuery] = useState('');
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  // Notifications state
-  const [notifOpen, setNotifOpen] = useState(false);
-  const notifRef = useRef<HTMLDivElement>(null);
-
-  function handleSearch(e: React.FormEvent) {
-    e.preventDefault();
-    if (!query.trim()) return;
-    const current = SEARCH_ROUTES.find((r) => pathname.startsWith(r.path));
-    if (current) {
-      router.push(`${current.path}?search=${encodeURIComponent(query.trim())}`);
-    } else {
-      router.push(`/dashboard/products?search=${encodeURIComponent(query.trim())}`);
-    }
-    setShowSuggestions(false);
-  }
-
-  const suggestions = query.length >= 2
-    ? SEARCH_ROUTES.filter((r) => r.label.toLowerCase().includes(query.toLowerCase()))
-    : [];
-
-  // Close search dropdown on outside click
   useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (!inputRef.current?.parentElement?.contains(e.target as Node)) {
-        setShowSuggestions(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, []);
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [open]);
 
-  // Close notification panel on outside click
-  useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (!notifRef.current?.contains(e.target as Node)) {
-        setNotifOpen(false);
-      }
-    }
-    if (notifOpen) document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [notifOpen]);
-
-  // Unread count — poll every 60s
-  const { data: unreadData } = useQuery({
-    queryKey: ['notif-unread'],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/notifications/unread-count');
-      return data.data as { count: number };
-    },
+  const { data: unread } = useQuery({
+    queryKey: ['notifications', 'unread-count'],
+    queryFn: async () => (await apiClient.get('/notifications/unread-count')).data.data as { count: number },
     refetchInterval: 60_000,
   });
 
-  // Notification list — only fetched when panel is open
-  const { data: notifications, isLoading: notifLoading } = useQuery<Notification[]>({
-    queryKey: ['notifications'],
+  const { data: items = [], isLoading } = useQuery<Notification[]>({
+    queryKey: ['notifications', 'list'],
+    enabled: open,
     queryFn: async () => {
       const { data } = await apiClient.get('/notifications', { params: { limit: 15 } });
-      return data.data?.items ?? [];
-    },
-    enabled: notifOpen,
-  });
-
-  const markAllRead = useMutation({
-    mutationFn: () => apiClient.patch('/notifications/read-all'),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['notif-unread'] });
-      queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      return data.data?.data ?? [];
     },
   });
 
-  const markOneRead = useMutation({
-    mutationFn: (id: string) => apiClient.patch(`/notifications/${id}/read`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['notif-unread'] });
-      queryClient.invalidateQueries({ queryKey: ['notifications'] });
-    },
-  });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ['notifications'] });
+  const markAll = useMutation({ mutationFn: () => apiClient.patch('/notifications/read-all'), onSuccess: refresh });
+  const markOne = useMutation({ mutationFn: (id: string) => apiClient.patch(`/notifications/${id}/read`), onSuccess: refresh });
 
-  const unreadCount = unreadData?.count ?? 0;
+  const count = unread?.count ?? 0;
 
   return (
-    <header className="flex h-14 items-center gap-3 border-b bg-background px-4">
-      <Button
-        variant="ghost"
-        size="icon"
-        className="lg:hidden h-8 w-8"
-        onClick={() => setSidebarOpen(true)}
-      >
-        <Menu className="h-5 w-5" />
+    <div className="relative" ref={ref}>
+      <Button variant="ghost" size="icon" className="relative" onClick={() => setOpen((v) => !v)} aria-label="Notificaciones">
+        <Bell />
+        {count > 0 && (
+          <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-white">
+            {count > 9 ? '9+' : count}
+          </span>
+        )}
       </Button>
 
-      {title && <h1 className="hidden sm:block text-lg font-semibold">{title}</h1>}
-
-      <form onSubmit={handleSearch} className="flex-1 hidden md:block max-w-sm">
-        <div className="relative" ref={inputRef as React.RefObject<HTMLDivElement>}>
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            ref={inputRef}
-            placeholder="Buscar en esta sección..."
-            className="pl-9 h-8 bg-muted border-0"
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); setShowSuggestions(true); }}
-            onFocus={() => setShowSuggestions(true)}
-          />
-          {showSuggestions && suggestions.length > 0 && (
-            <div className="absolute top-full mt-1 left-0 right-0 bg-popover border rounded-md shadow-md z-50 py-1">
-              {suggestions.map((s) => (
-                <button
-                  key={s.path}
-                  type="button"
-                  className="w-full text-left px-3 py-1.5 text-sm hover:bg-accent transition-colors"
-                  onClick={() => { router.push(s.path); setQuery(''); setShowSuggestions(false); }}
-                >
-                  Ir a <span className="font-medium">{s.label}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </form>
-
-      <div className="ml-auto flex items-center gap-1">
-        {/* Notifications panel */}
-        <div className="relative" ref={notifRef}>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 relative"
-            onClick={() => setNotifOpen((v) => !v)}
-            aria-label="Notificaciones"
-          >
-            <Bell className="h-4 w-4" />
-            {unreadCount > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 h-4 w-4 flex items-center justify-center rounded-full bg-destructive text-[10px] text-destructive-foreground font-bold">
-                {unreadCount > 9 ? '9+' : unreadCount}
-              </span>
+      {open && (
+        <div className="absolute right-0 top-11 z-50 w-[360px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border bg-popover shadow-elevated">
+          <div className="flex items-center justify-between border-b px-4 py-3">
+            <p className="text-sm font-semibold">Notificaciones</p>
+            {count > 0 && (
+              <button
+                className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline disabled:opacity-50"
+                onClick={() => markAll.mutate()}
+                disabled={markAll.isPending}
+              >
+                <CheckCheck className="h-3.5 w-3.5" /> Marcar todas como leídas
+              </button>
             )}
-          </Button>
-
-          {notifOpen && (
-            <div className="absolute right-0 top-10 w-80 bg-popover border rounded-lg shadow-xl z-50 overflow-hidden">
-              <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/40">
-                <span className="text-sm font-semibold">
-                  Notificaciones
-                  {unreadCount > 0 && (
-                    <span className="ml-2 text-xs bg-destructive text-destructive-foreground rounded-full px-1.5 py-0.5 font-bold">
-                      {unreadCount}
-                    </span>
+          </div>
+          <div className="max-h-[380px] overflow-y-auto">
+            {isLoading ? (
+              <p className="py-10 text-center text-sm text-muted-foreground">Cargando...</p>
+            ) : items.length === 0 ? (
+              <div className="py-12 text-center">
+                <Bell className="mx-auto mb-2 h-6 w-6 text-muted-foreground/60" />
+                <p className="text-sm text-muted-foreground">No tienes notificaciones</p>
+              </div>
+            ) : (
+              items.map((n) => (
+                <button
+                  key={n.id}
+                  type="button"
+                  className={cn(
+                    'flex w-full gap-3 border-b px-4 py-3 text-left transition-colors last:border-b-0 hover:bg-muted/50',
+                    n.status === 'unread' && 'bg-primary/[0.04]',
                   )}
-                </span>
-                {unreadCount > 0 && (
-                  <button
-                    className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-                    onClick={() => markAllRead.mutate()}
-                    disabled={markAllRead.isPending}
-                  >
-                    Marcar todas leídas
-                  </button>
-                )}
-              </div>
-
-              <div className="max-h-80 overflow-y-auto">
-                {notifLoading ? (
-                  <p className="text-sm text-muted-foreground text-center py-8">Cargando...</p>
-                ) : !notifications || notifications.length === 0 ? (
-                  <p className="text-sm text-muted-foreground text-center py-10">Sin notificaciones</p>
-                ) : (
-                  notifications.map((n) => (
-                    <button
-                      key={n.id}
-                      type="button"
-                      className={`w-full text-left px-3 py-2.5 border-b last:border-b-0 hover:bg-accent/50 transition-colors ${n.status === 'unread' ? 'bg-primary/5' : ''}`}
-                      onClick={() => { if (n.status === 'unread') markOneRead.mutate(n.id); }}
-                    >
-                      <div className="flex items-start gap-2">
-                        {n.status === 'unread' && (
-                          <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary" />
-                        )}
-                        <div className={n.status === 'unread' ? '' : 'ml-4'}>
-                          <p className="text-sm font-medium leading-tight">{n.title}</p>
-                          {n.body && (
-                            <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{n.body}</p>
-                          )}
-                          <p className="text-xs text-muted-foreground mt-1">
-                            {new Date(n.sentAt).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' })}
-                          </p>
-                        </div>
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
+                  onClick={() => n.status === 'unread' && markOne.mutate(n.id)}
+                >
+                  <span
+                    className={cn(
+                      'mt-1.5 h-2 w-2 shrink-0 rounded-full',
+                      n.status === 'unread' ? (n.priority === 'high' ? 'bg-destructive' : 'bg-primary') : 'bg-transparent',
+                    )}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-medium leading-snug">{n.title}</span>
+                    {n.body && <span className="mt-0.5 block whitespace-pre-line text-xs text-muted-foreground line-clamp-3">{n.body}</span>}
+                    <span className="mt-1 block text-[11px] text-muted-foreground">{formatRelativeTime(n.sentAt)}</span>
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
         </div>
+      )}
+    </div>
+  );
+}
 
-        {/* Theme toggle */}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8"
-          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+function UserMenu() {
+  const router = useRouter();
+  const user = useAuthStore((s) => s.user);
+  const logout = useAuthStore((s) => s.logout);
+  const { theme, setTheme } = useUiStore();
+  if (!user) return null;
+
+  const roleLabel = user.userRoles?.[0]?.roleName ?? user.role.replace(/_/g, ' ');
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button className="flex items-center gap-2.5 rounded-lg py-1 pl-1 pr-2 transition-colors hover:bg-muted" aria-label="Menú de usuario">
+          <Avatar className="h-8 w-8">
+            <AvatarFallback className="bg-primary text-xs font-semibold text-primary-foreground">
+              {getInitials(user.firstName, user.lastName)}
+            </AvatarFallback>
+          </Avatar>
+          <span className="hidden text-left lg:block">
+            <span className="block max-w-[140px] truncate text-sm font-medium leading-tight">
+              {user.firstName} {user.lastName}
+            </span>
+            <span className="block max-w-[140px] truncate text-[11px] capitalize text-muted-foreground">{roleLabel}</span>
+          </span>
+          <ChevronDown className="hidden h-4 w-4 text-muted-foreground lg:block" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-60">
+        <DropdownMenuLabel className="font-normal">
+          <p className="truncate text-sm font-semibold">
+            {user.firstName} {user.lastName}
+          </p>
+          <p className="truncate text-xs text-muted-foreground">{user.email}</p>
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link href="/dashboard/profile" className="cursor-pointer">
+            <UserRound className="mr-2 h-4 w-4" /> Mi perfil
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Tema</DropdownMenuLabel>
+        <div className="grid grid-cols-3 gap-1 px-2 pb-2">
+          {THEMES.map((t) => (
+            <button
+              key={t.value}
+              onClick={() => setTheme(t.value)}
+              className={cn(
+                'flex flex-col items-center gap-1 rounded-md border py-1.5 text-[11px] transition-colors',
+                theme === t.value ? 'border-primary bg-primary/10 text-primary' : 'border-transparent hover:bg-muted',
+              )}
+            >
+              <t.icon className="h-4 w-4" />
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          className="cursor-pointer text-destructive focus:text-destructive"
+          onClick={async () => {
+            await logout();
+            router.replace('/login');
+          }}
         >
-          {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-        </Button>
+          <LogOut className="mr-2 h-4 w-4" /> Cerrar sesión
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+export function Header() {
+  const pathname = usePathname();
+  const setSidebarOpen = useUiStore((s) => s.setSidebarOpen);
+  const setCommandOpen = useUiStore((s) => s.setCommandOpen);
+  const current = findNavItem(pathname);
+  const [isMac, setIsMac] = useState(false);
+
+  useEffect(() => {
+    setIsMac(/Mac|iPhone|iPad/.test(navigator.platform));
+  }, []);
+
+  return (
+    <header className="sticky top-0 z-30 flex h-16 shrink-0 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur md:px-6">
+      <Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setSidebarOpen(true)} aria-label="Abrir menú">
+        <Menu />
+      </Button>
+
+      <div className="hidden min-w-0 items-center gap-2 text-sm sm:flex">
+        <span className="text-muted-foreground">Inicio</span>
+        {current && current.href !== '/dashboard' && (
+          <>
+            <span className="text-muted-foreground/50">/</span>
+            <span className="truncate font-medium">{current.label}</span>
+          </>
+        )}
+      </div>
+
+      <button
+        onClick={() => setCommandOpen(true)}
+        className="ml-auto flex h-9 w-full max-w-[280px] items-center gap-2 rounded-lg border bg-card px-3 text-sm text-muted-foreground shadow-sm transition-colors hover:border-primary/40 sm:ml-6 md:w-72"
+      >
+        <Search className="h-4 w-4" />
+        <span className="flex-1 truncate text-left">Buscar...</span>
+        <kbd className="hidden rounded border bg-muted px-1.5 font-sans text-[10px] font-medium sm:inline-block">
+          {isMac ? '⌘' : 'Ctrl'} K
+        </kbd>
+      </button>
+
+      <div className="ml-auto flex items-center gap-1.5">
+        <BranchSelector />
+        <NotificationsMenu />
+        <div className="mx-1 hidden h-6 w-px bg-border sm:block" />
+        <UserMenu />
       </div>
     </header>
   );

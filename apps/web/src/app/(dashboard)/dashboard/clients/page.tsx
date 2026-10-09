@@ -1,5 +1,6 @@
 'use client';
 
+import { confirm } from '@/components/common/confirm-dialog';
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Pencil, Plus, Search, Trash2, Users } from 'lucide-react';
@@ -187,7 +188,7 @@ export default function ClientsPage() {
                           <Button
                             variant="ghost" size="icon"
                             className="h-8 w-8 text-destructive hover:text-destructive"
-                            onClick={() => { if (confirm(`¿Eliminar cliente?`)) deleteMutation.mutate(c.id); }}
+                            onClick={async () => { if (await confirm({ title: `¿Eliminar cliente?`, description: 'Esta acción no se puede deshacer.', destructive: true, confirmText: 'Confirmar' })) deleteMutation.mutate(c.id); }}
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>

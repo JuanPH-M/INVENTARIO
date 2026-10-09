@@ -1,200 +1,438 @@
 'use client';
 
+import { useState } from 'react';
+import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import { useQuery } from '@tanstack/react-query';
 import {
-  AlertTriangle, DollarSign, Package, ShoppingCart, TrendingDown, TrendingUp, Truck,
+  ArrowRight,
+  Boxes,
+  CircleDollarSign,
+  PackageSearch,
+  Receipt,
+  ScanBarcode,
+  ShoppingBag,
+  Sparkles,
+  TrendingUp,
+  Truck,
+  Users,
 } from 'lucide-react';
 import { apiClient } from '@/lib/api-client';
-import { formatCurrency } from '@/lib/utils';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Skeleton } from '@/components/ui/skeleton';
+import { cn, formatCompact, formatCurrency, formatRelativeTime } from '@/lib/utils';
+import { PAYMENT_LABELS, SALE_STATUS, label } from '@/lib/labels';
+import { useAuthStore } from '@/stores/auth.store';
+import { useUiStore } from '@/stores/ui.store';
+import { useBranches } from '@/hooks/use-branches';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { StatCard } from '@/components/common/stat-card';
+import { EmptyState } from '@/components/common/empty-state';
+import { ErrorState } from '@/components/common/error-state';
 
-type DashboardData = {
-  period: { start: string; end: string };
-  sales: { total: number; count: number; averageTicket: number; totalDiscount: number };
-  purchases: { total: number; count: number };
-  inventory: { activeProducts: number; stockLines: number };
-  operations: { openIncidents: number; monthlySubscriptionCost: number };
+const Charts = {
+  Trend: dynamic(() => import('@/components/charts/business-charts').then((m) => m.RevenueTrendChart), {
+    ssr: false,
+    loading: () => <Skeleton className="h-[280px] w-full" />,
+  }),
+  Branches: dynamic(() => import('@/components/charts/business-charts').then((m) => m.BranchBarChart), {
+    ssr: false,
+    loading: () => <Skeleton className="h-[180px] w-full" />,
+  }),
+  Payments: dynamic(() => import('@/components/charts/business-charts').then((m) => m.PaymentMixChart), {
+    ssr: false,
+    loading: () => <Skeleton className="h-[170px] w-full" />,
+  }),
 };
 
-type TrendPoint = { date: string; revenue: number; transactions: number };
-type TopProduct = { productId: string; productName: string; _sum: { quantity: number; subtotal: number }; _count: { id: number } };
+type Overview = {
+  period: { start: string; end: string; days: number };
+  kpis: {
+    revenue: number;
+    revenueChange: number | null;
+    salesCount: number;
+    salesCountChange: number | null;
+    averageTicket: number;
+    averageTicketChange: number | null;
+    grossProfit: number;
+    grossProfitChange: number | null;
+    grossMargin: number;
+    taxCollected: number;
+    purchasesTotal: number;
+  };
+  trend: Array<{ date: string; revenue: number; transactions: number }>;
+  byBranch: Array<{ branchId: string; name: string; revenue: number; transactions: number }>;
+  byPayment: Array<{ type: string; amount: number; count: number }>;
+  topProducts: Array<{ productId: string; name: string; quantity: number; revenue: number }>;
+  recentSales: Array<{
+    id: string;
+    saleNumber: string;
+    total: number;
+    status: string;
+    createdAt: string;
+    branch?: string;
+    payment: string | null;
+    customer: string;
+  }>;
+  inventory: { activeProducts: number; stockValue: number; stockRetailValue: number; lowStock: number; outOfStock: number };
+};
 
-const DashboardCharts = dynamic(() => import('./dashboard-charts'), {
-  loading: () => <Skeleton className="h-[340px] w-full rounded-lg" />,
-  ssr: false,
-});
+type Forecast = {
+  productId: string;
+  productName: string;
+  branchName: string;
+  currentStock: number;
+  predictedDaysUntilStockout: number | null;
+  recommendedReorderQty: number;
+  risk: 'critical' | 'high' | 'medium' | 'low';
+};
 
-function StatCard({ title, value, sub, icon: Icon, highlight = false, isLoading }: {
-  title: string; value: string; sub?: string; icon: React.ElementType; highlight?: boolean; isLoading: boolean;
-}) {
+const PERIODS = [
+  { days: 7, label: '7 días' },
+  { days: 30, label: '30 días' },
+  { days: 90, label: '90 días' },
+];
+
+function greeting(): string {
+  const h = new Date().getHours();
+  return h < 12 ? 'Buenos días' : h < 19 ? 'Buenas tardes' : 'Buenas noches';
+}
+
+function QuickActions() {
+  const user = useAuthStore((s) => s.user);
+  const can = (p: string) => user?.permissions.includes(p) ?? false;
+  const actions = [
+    { href: '/dashboard/pos', label: 'Nueva venta', icon: ScanBarcode, show: can('sales:create'), primary: true },
+    { href: '/dashboard/products', label: 'Productos', icon: PackageSearch, show: can('products:read') },
+    { href: '/dashboard/purchases', label: 'Compras', icon: Truck, show: can('purchases:read') },
+    { href: '/dashboard/clients', label: 'Clientes', icon: Users, show: can('clients:read') },
+  ].filter((a) => a.show);
+  if (actions.length === 0) return null;
   return (
-    <Card className={highlight ? 'border-yellow-300 dark:border-yellow-700' : ''}>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">{title}</CardTitle>
-        <Icon className={`h-4 w-4 ${highlight ? 'text-yellow-500' : 'text-muted-foreground'}`} />
+    <div className="flex flex-wrap gap-2">
+      {actions.map((a) => (
+        <Button key={a.href} asChild variant={a.primary ? 'default' : 'outline'} size="sm">
+          <Link href={a.href}>
+            <a.icon /> {a.label}
+          </Link>
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function StockRiskCard({ branchId }: { branchId: string }) {
+  const canSee = useAuthStore((s) => s.user?.permissions.includes('ai:predictions') ?? false);
+  const { data = [], isLoading } = useQuery<Forecast[]>({
+    queryKey: ['ai', 'forecast', branchId],
+    enabled: canSee,
+    queryFn: async () => (await apiClient.get('/ai/predictions/stock', { params: { branchId: branchId || undefined } })).data.data,
+  });
+  if (!canSee) return null;
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-start justify-between space-y-0">
+        <div>
+          <CardTitle className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-primary" /> Reposición sugerida
+          </CardTitle>
+          <CardDescription>Productos que se agotarán pronto según el ritmo de ventas</CardDescription>
+        </div>
+        <Button asChild variant="ghost" size="sm">
+          <Link href="/dashboard/ai">
+            Ver todo <ArrowRight />
+          </Link>
+        </Button>
       </CardHeader>
-      <CardContent>
-        {isLoading ? <Skeleton className="h-8 w-32" /> : (
-          <>
-            <div className="text-2xl font-bold">{value}</div>
-            {sub && <p className="text-xs text-muted-foreground mt-1">{sub}</p>}
-          </>
+      <CardContent className="space-y-1">
+        {isLoading ? (
+          Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-11 w-full" />)
+        ) : data.length === 0 ? (
+          <EmptyState icon={Boxes} title="Inventario saludable" description="Ningún producto está en riesgo de agotarse." className="py-8" />
+        ) : (
+          data.slice(0, 6).map((f) => (
+            <div key={`${f.productId}-${f.branchName}`} className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-muted/50">
+              <span
+                className={cn(
+                  'h-2 w-2 shrink-0 rounded-full',
+                  f.risk === 'critical' ? 'bg-destructive' : f.risk === 'high' ? 'bg-warning' : 'bg-info',
+                )}
+              />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">{f.productName}</p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {f.branchName} · {f.currentStock} und
+                  {f.predictedDaysUntilStockout !== null && ` · ~${Math.round(f.predictedDaysUntilStockout)} días`}
+                </p>
+              </div>
+              <Badge variant="secondary" className="tabular">+{f.recommendedReorderQty}</Badge>
+            </div>
+          ))
         )}
       </CardContent>
     </Card>
   );
 }
 
-export default function DashboardPage() {
-  const { data, isLoading } = useQuery<DashboardData>({
-    queryKey: ['dashboard-summary'],
-    queryFn: async () => {
-      const { data } = await apiClient.get('/analytics/dashboard');
-      return data.data;
-    },
-    refetchInterval: 30_000,
-  });
-
-  const { data: trend = [], isLoading: trendLoading } = useQuery<TrendPoint[]>({
-    queryKey: ['sales-trend'],
-    queryFn: async () => {
-      try {
-        const { data } = await apiClient.get('/analytics/sales-trend');
-        return Array.isArray(data.data) ? data.data : [];
-      } catch { return []; }
-    },
-    refetchInterval: 30_000,
-  });
-
-  const { data: topProducts = [], isLoading: topLoading } = useQuery<TopProduct[]>({
-    queryKey: ['top-products'],
-    queryFn: async () => {
-      try {
-        const { data } = await apiClient.get('/analytics/top-products', { params: { limit: 8 } });
-        return Array.isArray(data.data) ? data.data : [];
-      } catch { return []; }
-    },
-    refetchInterval: 30_000,
-  });
-
+function SellerHome() {
+  const user = useAuthStore((s) => s.user);
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-2xl font-bold tracking-tight">Dashboard</h2>
-        <p className="text-muted-foreground">Resumen del mes actual</p>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {greeting()}, {user?.firstName}
+        </h1>
+        <p className="mt-1 text-sm text-muted-foreground">¿Qué quieres hacer hoy?</p>
+      </div>
+      <QuickActions />
+    </div>
+  );
+}
+
+export default function DashboardPage() {
+  const user = useAuthStore((s) => s.user);
+  const branchId = useUiStore((s) => s.branchId);
+  const { data: branches = [] } = useBranches();
+  const [days, setDays] = useState(30);
+  const canAnalytics = user?.permissions.includes('analytics:read') ?? false;
+
+  const { data, isLoading, isError, error, refetch } = useQuery<Overview>({
+    queryKey: ['analytics', 'overview', branchId, days],
+    enabled: canAnalytics,
+    refetchInterval: 60_000,
+    queryFn: async () =>
+      (await apiClient.get('/analytics/overview', { params: { days, branchId: branchId || undefined } })).data.data,
+  });
+
+  if (!canAnalytics) return <SellerHome />;
+
+  const k = data?.kpis;
+  const branchName = branches.find((b) => b.id === branchId)?.name;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {greeting()}, {user?.firstName}
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Resumen de {branchName ?? 'todas las sedes'} · últimos {days} días
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded-lg border bg-card p-0.5 shadow-sm">
+            {PERIODS.map((p) => (
+              <button
+                key={p.days}
+                onClick={() => setDays(p.days)}
+                className={cn(
+                  'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+                  days === p.days ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <QuickActions />
+        </div>
       </div>
 
-      <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          title="Ingresos del mes"
-          value={formatCurrency(data?.sales?.total ?? 0)}
-          sub={`${data?.sales?.count ?? 0} venta(s) · Ticket promedio: ${formatCurrency(data?.sales?.averageTicket ?? 0)}`}
-          icon={DollarSign}
-          isLoading={isLoading}
-        />
-        <StatCard
-          title="Ventas registradas"
-          value={String(data?.sales?.count ?? 0)}
-          sub={data?.sales?.totalDiscount ? `Descuentos: ${formatCurrency(data.sales.totalDiscount)}` : undefined}
-          icon={ShoppingCart}
-          isLoading={isLoading}
-        />
-        <StatCard
-          title="Compras del mes"
-          value={formatCurrency(data?.purchases?.total ?? 0)}
-          sub={`${data?.purchases?.count ?? 0} orden(es) de compra`}
-          icon={Truck}
-          isLoading={isLoading}
-        />
-        <StatCard
-          title="Productos activos"
-          value={String(data?.inventory?.activeProducts ?? 0)}
-          sub={`${data?.inventory?.stockLines ?? 0} líneas de stock`}
-          icon={Package}
-          isLoading={isLoading}
-        />
-      </div>
+      {isError ? (
+        <Card>
+          <ErrorState error={error} onRetry={() => refetch()} />
+        </Card>
+      ) : (
+        <>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard
+              title="Ingresos"
+              value={formatCurrency(k?.revenue ?? 0)}
+              change={k?.revenueChange}
+              hint="vs. periodo anterior"
+              icon={CircleDollarSign}
+              isLoading={isLoading}
+            />
+            <StatCard
+              title="Ventas"
+              value={(k?.salesCount ?? 0).toLocaleString('es-CO')}
+              change={k?.salesCountChange}
+              hint="transacciones"
+              icon={ShoppingBag}
+              tone="info"
+              isLoading={isLoading}
+            />
+            <StatCard
+              title="Ticket promedio"
+              value={formatCurrency(k?.averageTicket ?? 0)}
+              change={k?.averageTicketChange}
+              hint="por venta"
+              icon={Receipt}
+              tone="warning"
+              isLoading={isLoading}
+            />
+            <StatCard
+              title="Utilidad bruta"
+              value={formatCurrency(k?.grossProfit ?? 0)}
+              change={k?.grossProfitChange}
+              hint={`margen ${k?.grossMargin ?? 0}%`}
+              icon={TrendingUp}
+              tone="success"
+              isLoading={isLoading}
+            />
+          </div>
 
-      {(data?.operations?.openIncidents ?? 0) > 0 && (
-        <Card className="border-yellow-200 bg-yellow-50 dark:bg-yellow-900/10 dark:border-yellow-800">
-          <CardContent className="flex items-center gap-3 py-4">
-            <AlertTriangle className="h-5 w-5 text-yellow-600" />
-            <div>
-              <p className="text-sm font-medium text-yellow-800 dark:text-yellow-200">
-                {data?.operations?.openIncidents} incidente(s) abierto(s)
-              </p>
-              <p className="text-xs text-yellow-600 dark:text-yellow-400">Revisa el módulo de incidencias</p>
+          <div className="grid gap-4 lg:grid-cols-3">
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle>Ingresos diarios</CardTitle>
+                <CardDescription>Ventas completadas, impuestos incluidos</CardDescription>
+              </CardHeader>
+              <CardContent className="pl-2">
+                {isLoading ? <Skeleton className="h-[280px] w-full" /> : <Charts.Trend data={data?.trend ?? []} />}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Medios de pago</CardTitle>
+                <CardDescription>Distribución de lo recaudado</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {isLoading ? (
+                  <Skeleton className="h-[170px] w-full" />
+                ) : data?.byPayment.length ? (
+                  <Charts.Payments data={data.byPayment} />
+                ) : (
+                  <EmptyState title="Sin pagos en el periodo" className="py-8" />
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-3">
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle>Rendimiento por sede</CardTitle>
+                <CardDescription>Ingresos de cada tienda en el periodo</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {isLoading ? (
+                  <Skeleton className="h-[180px] w-full" />
+                ) : data?.byBranch.length ? (
+                  <Charts.Branches data={data.byBranch} />
+                ) : (
+                  <EmptyState title="Aún no hay ventas" className="py-8" />
+                )}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Productos estrella</CardTitle>
+                <CardDescription>Más vendidos por ingresos</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {isLoading
+                  ? Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-8 w-full" />)
+                  : (data?.topProducts ?? []).slice(0, 6).map((p, i) => {
+                      const max = data?.topProducts[0]?.revenue || 1;
+                      return (
+                        <div key={p.productId}>
+                          <div className="flex items-center justify-between gap-2 text-sm">
+                            <span className="truncate">
+                              <span className="mr-2 text-xs text-muted-foreground">{i + 1}</span>
+                              {p.name}
+                            </span>
+                            <span className="tabular shrink-0 font-medium">{formatCompact(p.revenue)}</span>
+                          </div>
+                          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
+                            <div className="h-full rounded-full bg-primary" style={{ width: `${(p.revenue / max) * 100}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-3">
+            <Card className="lg:col-span-2">
+              <CardHeader className="flex flex-row items-start justify-between space-y-0">
+                <div>
+                  <CardTitle>Últimas ventas</CardTitle>
+                  <CardDescription>Actividad más reciente</CardDescription>
+                </div>
+                <Button asChild variant="ghost" size="sm">
+                  <Link href="/dashboard/sales">
+                    Ver todas <ArrowRight />
+                  </Link>
+                </Button>
+              </CardHeader>
+              <CardContent className="px-0 pb-2">
+                {isLoading ? (
+                  <div className="space-y-2 px-5">
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <Skeleton key={i} className="h-10 w-full" />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="divide-y">
+                    {(data?.recentSales ?? []).map((s) => {
+                      const st = SALE_STATUS[s.status] ?? { label: s.status, tone: 'secondary' as const };
+                      return (
+                        <div key={s.id} className="flex items-center gap-3 px-5 py-2.5">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium">{s.customer}</p>
+                            <p className="truncate text-xs text-muted-foreground">
+                              #{s.saleNumber} · {s.branch} · {label(PAYMENT_LABELS, s.payment)}
+                            </p>
+                          </div>
+                          <Badge variant={st.tone} className="hidden sm:inline-flex">
+                            {st.label}
+                          </Badge>
+                          <div className="w-28 text-right">
+                            <p className="tabular text-sm font-semibold">{formatCurrency(s.total)}</p>
+                            <p className="text-[11px] text-muted-foreground">{formatRelativeTime(s.createdAt)}</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <div className="space-y-4">
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle>Inventario</CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="rounded-lg bg-muted/50 p-3">
+                    <p className="text-xs text-muted-foreground">Valor al costo</p>
+                    <p className="tabular mt-1 font-semibold">{formatCompact(data?.inventory.stockValue ?? 0)}</p>
+                  </div>
+                  <div className="rounded-lg bg-muted/50 p-3">
+                    <p className="text-xs text-muted-foreground">Valor de venta</p>
+                    <p className="tabular mt-1 font-semibold">{formatCompact(data?.inventory.stockRetailValue ?? 0)}</p>
+                  </div>
+                  <div className="rounded-lg bg-warning/10 p-3">
+                    <p className="text-xs text-muted-foreground">Stock bajo</p>
+                    <p className="tabular mt-1 font-semibold text-warning">{data?.inventory.lowStock ?? 0}</p>
+                  </div>
+                  <div className="rounded-lg bg-destructive/10 p-3">
+                    <p className="text-xs text-muted-foreground">Agotados</p>
+                    <p className="tabular mt-1 font-semibold text-destructive">{data?.inventory.outOfStock ?? 0}</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <StockRiskCard branchId={branchId} />
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </>
       )}
-
-      <DashboardCharts
-        trend={trend}
-        topProducts={topProducts}
-        trendLoading={trendLoading}
-        topLoading={topLoading}
-      />
-
-      {/* Resumen financiero */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <TrendingUp className="h-4 w-4 text-green-500" /> Ingresos vs Gastos
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? <Skeleton className="h-24 w-full" /> : (
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Ingresos por ventas</span>
-                  <span className="font-semibold text-green-600">{formatCurrency(data?.sales?.total ?? 0)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Compras realizadas</span>
-                  <span className="font-semibold text-red-600">-{formatCurrency(data?.purchases?.total ?? 0)}</span>
-                </div>
-                <div className="border-t pt-2 flex justify-between items-center">
-                  <span className="text-sm font-medium">Balance estimado</span>
-                  <span className={`font-bold ${(data?.sales?.total ?? 0) - (data?.purchases?.total ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {formatCurrency((data?.sales?.total ?? 0) - (data?.purchases?.total ?? 0))}
-                  </span>
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <TrendingDown className="h-4 w-4 text-blue-500" /> Métricas de inventario
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? <Skeleton className="h-24 w-full" /> : (
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Productos activos</span>
-                  <Badge variant="secondary">{data?.inventory?.activeProducts ?? 0}</Badge>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Líneas de stock registradas</span>
-                  <Badge variant="outline">{data?.inventory?.stockLines ?? 0}</Badge>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Incidentes abiertos</span>
-                  <Badge variant={data?.operations?.openIncidents ? 'destructive' : 'secondary'}>{data?.operations?.openIncidents ?? 0}</Badge>
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
     </div>
   );
 }

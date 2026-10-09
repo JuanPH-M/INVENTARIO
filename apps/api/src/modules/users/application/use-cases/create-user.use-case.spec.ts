@@ -36,6 +36,8 @@ describe('CreateUserUseCase', () => {
       },
       tenant: { findFirst: jest.fn() },
       userRole: { create: jest.fn() },
+      role: { findFirst: jest.fn().mockResolvedValue({ id: ROLE_ID, slug: 'seller', name: 'Vendedor' }) },
+      branch: { count: jest.fn().mockResolvedValue(1) },
     };
 
     (mockArgon2.hash as jest.Mock).mockResolvedValue('$argon2id$hashed');
@@ -167,6 +169,26 @@ describe('CreateUserUseCase', () => {
       (prisma['userRole'] as Record<string, jest.Mock>).create.mockResolvedValue({});
 
       await expect(useCase.execute(makeDto(), TENANT_ID, CREATOR_ID)).resolves.toBeDefined();
+    });
+  });
+
+  describe('execute — role policy', () => {
+    it('rejects a role that does not exist or belongs to another company', async () => {
+      (prisma['role'] as Record<string, jest.Mock>).findFirst.mockResolvedValue(null);
+      await expect(useCase.execute(makeDto(), TENANT_ID, CREATOR_ID, ['admin_general'])).rejects.toThrow('Rol no encontrado');
+      expect((prisma['user'] as Record<string, jest.Mock>).create).not.toHaveBeenCalled();
+    });
+
+    it('prevents a company admin from creating platform super admins', async () => {
+      (prisma['role'] as Record<string, jest.Mock>).findFirst.mockResolvedValue({ id: ROLE_ID, slug: 'super_admin', name: 'Super Admin' });
+      await expect(useCase.execute(makeDto(), TENANT_ID, CREATOR_ID, ['admin_general'])).rejects.toThrow(/No tienes autorización/);
+    });
+
+    it('rejects a branch from another company', async () => {
+      (prisma['branch'] as Record<string, jest.Mock>).count.mockResolvedValue(0);
+      await expect(
+        useCase.execute(makeDto({ branchId: 'foreign-branch' }), TENANT_ID, CREATOR_ID, ['admin_general']),
+      ).rejects.toThrow('La sucursal no existe');
     });
   });
 });

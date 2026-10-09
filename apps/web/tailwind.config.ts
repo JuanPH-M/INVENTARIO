@@ -1,4 +1,7 @@
 import type { Config } from 'tailwindcss';
+import animate from 'tailwindcss-animate';
+
+const color = (name: string) => `hsl(var(--${name}) / <alpha-value>)`;
 
 const config: Config = {
   darkMode: ['class'],
@@ -6,68 +9,64 @@ const config: Config = {
     './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
     './src/components/**/*.{js,ts,jsx,tsx,mdx}',
     './src/app/**/*.{js,ts,jsx,tsx,mdx}',
-    '../../packages/ui/src/**/*.{js,ts,jsx,tsx}',
   ],
   theme: {
+    container: { center: true, padding: '1rem', screens: { '2xl': '1440px' } },
     extend: {
       colors: {
-        border: 'hsl(var(--border))',
-        input: 'hsl(var(--input))',
-        ring: 'hsl(var(--ring))',
-        background: 'hsl(var(--background))',
-        foreground: 'hsl(var(--foreground))',
-        primary: {
-          DEFAULT: 'hsl(var(--primary))',
-          foreground: 'hsl(var(--primary-foreground))',
-        },
-        secondary: {
-          DEFAULT: 'hsl(var(--secondary))',
-          foreground: 'hsl(var(--secondary-foreground))',
-        },
-        destructive: {
-          DEFAULT: 'hsl(var(--destructive))',
-          foreground: 'hsl(var(--destructive-foreground))',
-        },
-        muted: {
-          DEFAULT: 'hsl(var(--muted))',
-          foreground: 'hsl(var(--muted-foreground))',
-        },
-        accent: {
-          DEFAULT: 'hsl(var(--accent))',
-          foreground: 'hsl(var(--accent-foreground))',
-        },
-        popover: {
-          DEFAULT: 'hsl(var(--popover))',
-          foreground: 'hsl(var(--popover-foreground))',
-        },
-        card: {
-          DEFAULT: 'hsl(var(--card))',
-          foreground: 'hsl(var(--card-foreground))',
+        border: color('border'),
+        input: color('input'),
+        ring: color('ring'),
+        background: color('background'),
+        foreground: color('foreground'),
+        primary: { DEFAULT: color('primary'), foreground: color('primary-foreground') },
+        secondary: { DEFAULT: color('secondary'), foreground: color('secondary-foreground') },
+        destructive: { DEFAULT: color('destructive'), foreground: color('destructive-foreground') },
+        success: { DEFAULT: color('success'), foreground: color('success-foreground') },
+        warning: { DEFAULT: color('warning'), foreground: color('warning-foreground') },
+        info: { DEFAULT: color('info'), foreground: color('info-foreground') },
+        muted: { DEFAULT: color('muted'), foreground: color('muted-foreground') },
+        accent: { DEFAULT: color('accent'), foreground: color('accent-foreground') },
+        popover: { DEFAULT: color('popover'), foreground: color('popover-foreground') },
+        card: { DEFAULT: color('card'), foreground: color('card-foreground') },
+        sidebar: {
+          DEFAULT: color('sidebar'),
+          foreground: color('sidebar-foreground'),
+          muted: color('sidebar-muted'),
+          accent: color('sidebar-accent'),
+          border: color('sidebar-border'),
+          active: color('sidebar-active'),
         },
         chart: {
-          '1': 'hsl(var(--chart-1))',
-          '2': 'hsl(var(--chart-2))',
-          '3': 'hsl(var(--chart-3))',
-          '4': 'hsl(var(--chart-4))',
-          '5': 'hsl(var(--chart-5))',
+          '1': color('chart-1'),
+          '2': color('chart-2'),
+          '3': color('chart-3'),
+          '4': color('chart-4'),
+          '5': color('chart-5'),
         },
       },
       borderRadius: {
+        xl: 'calc(var(--radius) + 4px)',
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        sans: ['var(--font-inter)', 'Inter', 'system-ui', 'sans-serif'],
       },
-      fontSize: {
-        'accessible-base': ['1.0625rem', { lineHeight: '1.7' }],
-        'accessible-lg': ['1.125rem', { lineHeight: '1.7' }],
-        'accessible-xl': ['1.25rem', { lineHeight: '1.6' }],
+      boxShadow: {
+        card: '0 1px 2px 0 rgb(15 23 42 / 0.04), 0 1px 3px 0 rgb(15 23 42 / 0.04)',
+        elevated: '0 10px 30px -12px rgb(15 23 42 / 0.25)',
+      },
+      keyframes: {
+        shimmer: { '100%': { transform: 'translateX(100%)' } },
+      },
+      animation: {
+        shimmer: 'shimmer 1.6s infinite',
       },
     },
   },
-  plugins: [require('tailwindcss-animate')],
+  plugins: [animate],
 };
 
 export default config;

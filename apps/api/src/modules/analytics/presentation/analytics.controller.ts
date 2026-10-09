@@ -2,24 +2,36 @@ import {
   Controller, Get, Query, UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { PrismaService } from '../../../database/prisma.service';
 import { CacheService } from '../../../cache/cache.service';
+import { AnalyticsService, dayKey } from '../application/analytics.service';
 import { PERMISSIONS } from '@inventario/shared';
 import type { JwtPayload } from '@inventario/types';
 
 @ApiTags('Analíticas')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('analytics')
 export class AnalyticsController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
+    private readonly analytics: AnalyticsService,
   ) {}
+
+  @Get('overview')
+  @RequirePermissions(PERMISSIONS.ANALYTICS_READ)
+  @ApiOperation({ summary: 'Resumen completo: KPIs con variación, utilidad, tendencia, sedes, pagos y productos' })
+  async getOverview(
+    @CurrentUser() user: JwtPayload,
+    @Query('branchId') branchId?: string,
+    @Query('days') days?: string,
+  ) {
+    return this.analytics.overview(user.tenantId, Number(days ?? 30), user.branchId ?? (branchId || undefined));
+  }
 
   @Get('dashboard')
   @RequirePermissions(PERMISSIONS.ANALYTICS_READ)
@@ -130,7 +142,7 @@ export class AnalyticsController {
 
       const dailyMap = new Map<string, { revenue: number; transactions: number }>();
       for (const sale of salesRows) {
-        const key = sale.createdAt.toISOString().split('T')[0];
+        const key = dayKey(sale.createdAt);
         const entry = dailyMap.get(key) ?? { revenue: 0, transactions: 0 };
         entry.revenue += Number(sale.total);
         entry.transactions += 1;
@@ -142,7 +154,7 @@ export class AnalyticsController {
         const d = new Date();
         d.setDate(d.getDate() - i);
         d.setHours(0, 0, 0, 0);
-        const key = d.toISOString().split('T')[0];
+        const key = dayKey(d);
         const entry = dailyMap.get(key) ?? { revenue: 0, transactions: 0 };
         results.push({ date: key, ...entry });
       }

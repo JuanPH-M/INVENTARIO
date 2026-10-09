@@ -57,3 +57,12 @@ export function getInitials(firstName: string, lastName: string): string {
 export function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
+
+/** Cifras compactas para ejes y KPIs: 1.250.000 → "1,3 M". */
+export function formatCompact(value: number, locale = 'es-CO'): string {
+  return new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+}
+
+export function formatNumber(value: number, decimals = 0, locale = 'es-CO'): string {
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: decimals }).format(value);
+}

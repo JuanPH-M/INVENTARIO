@@ -93,8 +93,17 @@ export class MfaUseCase {
     );
     if (!pending) throw new UnauthorizedException('Token MFA expirado o inválido');
 
+    // Máximo 5 intentos por token MFA: evita fuerza bruta sobre el código de 6 dígitos
+    const attemptsKey = 'mfa:attempts:' + mfaToken;
+    const attempts = await this.cacheService.increment(attemptsKey);
+    await this.cacheService.expire(attemptsKey, 300);
+    if (attempts > 5) {
+      await this.cacheService.del('mfa:pending:' + mfaToken);
+      throw new UnauthorizedException('Demasiados intentos. Inicia sesión de nuevo');
+    }
+
     const user = await this.prisma.user.findFirst({
-      where: { id: pending.userId },
+      where: { id: pending.userId, deletedAt: null, status: 'active' },
       include: {
         userRoles: {
           where: { OR: [{ expiresAt: { gt: new Date() } }, { expiresAt: null }] },
@@ -113,7 +122,7 @@ export class MfaUseCase {
 
     if (!isValid) throw new UnauthorizedException('Código MFA inválido');
 
-    await this.cacheService.del(`mfa:pending:${mfaToken}`);
+    await this.cacheService.delMany(['mfa:pending:' + mfaToken, attemptsKey]);
 
     const roles = user.userRoles.map((ur) => ur.role.slug);
     return this.loginUseCase.generateTokens(
@@ -123,6 +132,7 @@ export class MfaUseCase {
       roles,
       userAgent,
       ipAddress,
+      user.email,
     );
   }
 
@@ -180,8 +190,15 @@ export class MfaUseCase {
     return false;
   }
 
+  /** Clave AES-256: ENCRYPTION_KEY (64 hex) o, si no es válida, derivada con SHA-256. */
+  private encryptionKey(): Buffer {
+    const raw = this.config.get<string>('app.encryptionKey') ?? '';
+    if (/^[0-9a-fA-F]{64}$/.test(raw)) return Buffer.from(raw, 'hex');
+    return crypto.createHash('sha256').update(raw || 'inventario-dev-encryption-key').digest();
+  }
+
   private encryptSecret(secret: string): string {
-    const key = Buffer.from(this.config.get<string>('app.encryptionKey') ?? '0'.repeat(64), 'hex');
+    const key = this.encryptionKey();
     const iv = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
     const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
@@ -193,7 +210,7 @@ export class MfaUseCase {
     try {
       const [ivHex, tagHex, dataHex] = encryptedSecret.split(':');
       if (!ivHex || !tagHex || !dataHex) return encryptedSecret;
-      const key = Buffer.from(this.config.get<string>('app.encryptionKey') ?? '0'.repeat(64), 'hex');
+      const key = this.encryptionKey();
       const iv = Buffer.from(ivHex, 'hex');
       const tag = Buffer.from(tagHex, 'hex');
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);

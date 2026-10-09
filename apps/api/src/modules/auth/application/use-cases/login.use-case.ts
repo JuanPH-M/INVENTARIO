@@ -1,8 +1,4 @@
-import {
-  Injectable,
-  UnauthorizedException,
-  BadRequestException,
-} from '@nestjs/common';
+import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as argon2 from 'argon2';
@@ -16,10 +12,13 @@ import type { TokenResponse } from '@inventario/types';
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_DURATION_MINUTES = 15;
+const INVALID_CREDENTIALS = 'Credenciales inválidas';
 
 export type LoginResult =
   | { type: 'success'; data: TokenResponse }
   | { type: 'mfa_required'; mfaToken: string };
+
+type DurationString = `${number}${'s' | 'm' | 'h' | 'd'}`;
 
 @Injectable()
 export class LoginUseCase {
@@ -31,61 +30,77 @@ export class LoginUseCase {
   ) {}
 
   async execute(dto: LoginDto, ipAddress: string, userAgent: string): Promise<LoginResult> {
-    const user = await this.prisma.user.findFirst({
-      where: { email: dto.email.toLowerCase() },
+    const email = dto.email.toLowerCase();
+
+    // El email es único por empresa, no globalmente: si existe en varias empresas
+    // se pide el código de la empresa para desambiguar.
+    const candidates = await this.prisma.user.findMany({
+      where: {
+        email,
+        deletedAt: null,
+        ...(dto.tenantSlug ? { tenant: { slug: dto.tenantSlug } } : {}),
+      },
       include: {
-        tenant: { select: { id: true, status: true, planId: true } },
+        tenant: { select: { id: true, status: true, planId: true, deletedAt: true } },
         userRoles: {
           where: { OR: [{ expiresAt: { gt: new Date() } }, { expiresAt: null }] },
           include: { role: { select: { slug: true } } },
         },
       },
+      take: 2,
     });
 
+    if (candidates.length > 1) {
+      throw new BadRequestException({
+        message: 'Este email pertenece a varias empresas. Indica el código de tu empresa.',
+        code: 'TENANT_REQUIRED',
+      });
+    }
+
+    const user = candidates[0];
     if (!user) {
-      await this.trackFailedAttempt(dto.email, ipAddress);
-      throw new UnauthorizedException('Credenciales inválidas');
+      await this.trackFailedAttempt(ipAddress);
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
 
-    if (user.tenant.status !== 'active') {
-      throw new UnauthorizedException('Esta empresa está suspendida');
+    if (user.tenant.status !== 'active' || user.tenant.deletedAt) {
+      throw new UnauthorizedException('Esta empresa está suspendida. Contacta al administrador');
     }
 
-    if (user.status === 'locked' && user.lockedUntil) {
-      if (user.lockedUntil > new Date()) {
-        const minutesLeft = Math.ceil(
-          (user.lockedUntil.getTime() - Date.now()) / 60000,
-        );
+    if (user.status === 'locked') {
+      // lockedUntil nulo = bloqueo manual hecho por un administrador
+      if (!user.lockedUntil || user.lockedUntil > new Date()) {
+        const minutesLeft = user.lockedUntil
+          ? Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60_000)
+          : null;
         throw new UnauthorizedException(
-          `Cuenta bloqueada. Intenta en ${minutesLeft} minutos`,
+          minutesLeft
+            ? `Cuenta bloqueada temporalmente. Intenta de nuevo en ${minutesLeft} minuto(s)`
+            : 'Cuenta bloqueada. Contacta al administrador',
         );
       }
-    }
-
-    if (user.status === 'suspended') {
-      throw new UnauthorizedException('Cuenta suspendida');
+    } else if (user.status !== 'active') {
+      throw new UnauthorizedException('Cuenta inactiva o suspendida. Contacta al administrador');
     }
 
     const isPasswordValid = await argon2.verify(user.passwordHash, dto.password);
     if (!isPasswordValid) {
-      await this.trackFailedAttempt(dto.email, ipAddress);
+      await this.trackFailedAttempt(ipAddress);
       const attempts = user.failedLoginAttempts + 1;
+      const willLock = attempts >= MAX_FAILED_ATTEMPTS;
       await this.prisma.user.update({
         where: { id: user.id },
         data: {
-          failedLoginAttempts: { increment: 1 },
-          ...(attempts >= MAX_FAILED_ATTEMPTS
-            ? {
-                status: 'locked',
-                lockedUntil: new Date(
-                  Date.now() + LOCK_DURATION_MINUTES * 60 * 1000,
-                ),
-              }
+          failedLoginAttempts: willLock ? 0 : attempts,
+          ...(willLock
+            ? { status: 'locked', lockedUntil: new Date(Date.now() + LOCK_DURATION_MINUTES * 60_000) }
             : {}),
         },
       });
       throw new UnauthorizedException(
-        `Credenciales inválidas. Intentos restantes: ${MAX_FAILED_ATTEMPTS - attempts}`,
+        willLock
+          ? `Demasiados intentos fallidos. Cuenta bloqueada por ${LOCK_DURATION_MINUTES} minutos`
+          : INVALID_CREDENTIALS,
       );
     }
 
@@ -110,8 +125,15 @@ export class LoginUseCase {
     }
 
     const roles = user.userRoles.map((ur) => ur.role.slug);
-    const tokens = await this.generateTokens(user.id, user.tenant.id, null, roles, userAgent, ipAddress);
-
+    const tokens = await this.generateTokens(
+      user.id,
+      user.tenant.id,
+      null,
+      roles,
+      userAgent,
+      ipAddress,
+      user.email,
+    );
     return { type: 'success', data: tokens };
   }
 
@@ -122,36 +144,26 @@ export class LoginUseCase {
     roles: string[],
     userAgent: string,
     ipAddress: string,
+    email = '',
   ): Promise<TokenResponse> {
     const sessionId = uuidv4();
     const expiresIn = this.config.get<string>('jwt.expiresIn') ?? '15m';
-    const privateKey = this.config.get<string>('jwt.privateKey');
+    const payload = { sub: userId, tenantId, branchId, roles, sessionId, email };
 
-    const payload = { sub: userId, tenantId, branchId, roles, sessionId, email: '' };
-
-    const signOptions = {
-      expiresIn: expiresIn as `${number}${'s'|'m'|'h'|'d'}`,
-      ...(privateKey ? { algorithm: 'RS256' as const, privateKey } : {}),
-    };
-
-    const accessToken = this.jwtService.sign(payload, signOptions);
+    // Algoritmo y clave vienen de la configuración de JwtModule (RS256 o HS256 en desarrollo)
+    const accessToken = this.jwtService.sign(payload, { expiresIn: expiresIn as DurationString });
 
     const refreshTokenRaw = crypto.randomBytes(64).toString('hex');
-    const refreshTokenHash = crypto
-      .createHash('sha256')
-      .update(refreshTokenRaw)
-      .digest('hex');
-
-    const refreshExpiresIn = this.config.get<string>('jwt.refreshTokenExpiresIn') ?? '7d';
-    const refreshExpiresMs = this.parseDuration(refreshExpiresIn);
+    const refreshTokenHash = crypto.createHash('sha256').update(refreshTokenRaw).digest('hex');
 
     await this.prisma.refreshToken.create({
       data: {
         userId,
         tokenHash: refreshTokenHash,
-        deviceInfo: { userAgent },
+        // sessionId permite revocar también el access token al cerrar sesión
+        deviceInfo: { userAgent, sessionId },
         ipAddress,
-        expiresAt: new Date(Date.now() + refreshExpiresMs),
+        expiresAt: new Date(Date.now() + this.refreshTokenTtlMs),
       },
     });
 
@@ -163,21 +175,24 @@ export class LoginUseCase {
     };
   }
 
-  private async trackFailedAttempt(email: string, ip: string): Promise<void> {
+  get refreshTokenTtlMs(): number {
+    return this.parseDuration(this.config.get<string>('jwt.refreshTokenExpiresIn') ?? '7d');
+  }
+
+  get accessTokenTtlSeconds(): number {
+    return this.parseDuration(this.config.get<string>('jwt.expiresIn') ?? '15m') / 1000;
+  }
+
+  private async trackFailedAttempt(ip: string): Promise<void> {
     const key = CACHE_KEYS.RATE_LIMIT_LOGIN(ip);
     await this.cacheService.increment(key);
     await this.cacheService.expire(key, CACHE_TTL.RATE_LIMIT);
   }
 
   private parseDuration(duration: string): number {
-    const units: Record<string, number> = {
-      s: 1000,
-      m: 60 * 1000,
-      h: 60 * 60 * 1000,
-      d: 24 * 60 * 60 * 1000,
-    };
+    const units: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
     const match = /^(\d+)([smhd])$/.exec(duration);
     if (!match || !match[1] || !match[2]) return 15 * 60 * 1000;
-    return parseInt(match[1], 10) * (units[match[2]] ?? 60000);
+    return parseInt(match[1], 10) * (units[match[2]] ?? 60_000);
   }
 }

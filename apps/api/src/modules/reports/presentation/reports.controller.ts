@@ -1,9 +1,9 @@
 import {
+  BadRequestException,
   Controller, Get, NotFoundException, Param, ParseUUIDPipe, Post, Query, Res, UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
@@ -92,7 +92,7 @@ const REPORT_TITLES: Record<string, string> = {
 
 @ApiTags('Reportes')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(PermissionsGuard)
 @Controller('reports')
 export class ReportsController {
   constructor(
@@ -143,7 +143,8 @@ export class ReportsController {
     @Query('date') date: string,
     @Query('branchId') branchId?: string,
   ) {
-    const targetDate = new Date(date);
+    const targetDate = date ? new Date(date) : new Date();
+    if (Number.isNaN(targetDate.getTime())) throw new BadRequestException('Fecha inválida (usa el formato AAAA-MM-DD)');
     const start = new Date(targetDate);
     start.setHours(0, 0, 0, 0);
     const effectiveBranchId = user.branchId ?? branchId;
