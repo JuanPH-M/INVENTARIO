@@ -17,6 +17,7 @@ import { EmptyState } from '@/components/common/empty-state';
 import { ErrorState } from '@/components/common/error-state';
 import { Combobox } from '@/components/common/combobox';
 import { confirm } from '@/components/common/confirm-dialog';
+import { EntityDocuments } from '@/components/common/entity-documents';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -274,6 +275,7 @@ export default function PurchasesPage() {
                 </p>
               </div>
               {detail.notes && <p className="rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground">{detail.notes}</p>}
+              <EntityDocuments entity="purchases" id={detail.id} canUpload={can('documents:create')} />
             </div>
           )}
           {detail && (

@@ -15,6 +15,7 @@ import { PageHeader } from '@/components/common/page-header';
 import { EmptyState } from '@/components/common/empty-state';
 import { ErrorState } from '@/components/common/error-state';
 import { Receipt, type ReceiptSale } from '@/components/sales/receipt';
+import { EntityDocuments } from '@/components/common/entity-documents';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -266,6 +267,7 @@ export default function SalesPage() {
               branchName={detail.branch?.name}
             />
           )}
+          {detail && <EntityDocuments entity="sales" id={detail.id} canUpload={user?.permissions.includes('documents:create') ?? false} />}
           <DialogFooter className="gap-2">
             {detail && canVoid && ['completed', 'pending'].includes(detail.status) && (
               <Button variant="outline" className="text-destructive" onClick={() => { setVoiding(detail); setViewId(null); }}>
