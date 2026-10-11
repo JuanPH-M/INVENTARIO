@@ -63,15 +63,27 @@ export class AssetsController {
   async findAll(
     @CurrentUser() user: JwtPayload,
     @Query('page') page?: number,
+    @Query('limit') limit?: number,
     @Query('branchId') branchId?: string,
     @Query('status') status?: string,
+    @Query('search') search?: string,
   ) {
-    const { page: p, limit: l, skip } = parsePaginationParams(page, 20);
+    const { page: p, limit: l, skip } = parsePaginationParams(page, limit ?? 20);
     const where = {
       tenantId: user.tenantId,
       deletedAt: null as null,
       ...(branchId ? { branchId } : {}),
       ...(status ? { status } : {}),
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: 'insensitive' as const } },
+              { serialNumber: { contains: search, mode: 'insensitive' as const } },
+              { internalCode: { contains: search, mode: 'insensitive' as const } },
+              { brand: { contains: search, mode: 'insensitive' as const } },
+            ],
+          }
+        : {}),
     };
     const [items, total] = await Promise.all([
       this.prisma.asset.findMany({
@@ -123,7 +135,7 @@ export class AssetsController {
     @Body() dto: AddMaintenanceDto,
     @CurrentUser() user: JwtPayload,
   ) {
-    const asset = await this.prisma.asset.findFirst({ where: { id, tenantId: user.tenantId } });
+    const asset = await this.prisma.asset.findFirst({ where: { id, tenantId: user.tenantId, deletedAt: null } });
     if (!asset) throw new NotFoundException();
     const maintenance = await this.prisma.assetMaintenance.create({
       data: {
@@ -149,9 +161,19 @@ export class AssetsController {
     @Body() dto: UpdateAssetDto,
     @CurrentUser() user: JwtPayload,
   ) {
-    const a = await this.prisma.asset.findFirst({ where: { id, tenantId: user.tenantId } });
+    const a = await this.prisma.asset.findFirst({ where: { id, tenantId: user.tenantId, deletedAt: null } });
     if (!a) throw new NotFoundException();
-    return this.prisma.asset.update({ where: { id }, data: dto });
+    // Las fechas llegan como 'YYYY-MM-DD' y Prisma exige objetos Date.
+    const { acquisitionDate, warrantyExpires, nextMaintenance, ...rest } = dto;
+    return this.prisma.asset.update({
+      where: { id },
+      data: {
+        ...rest,
+        ...(acquisitionDate ? { acquisitionDate: new Date(acquisitionDate) } : {}),
+        ...(warrantyExpires !== undefined ? { warrantyExpires: warrantyExpires ? new Date(warrantyExpires) : null } : {}),
+        ...(nextMaintenance !== undefined ? { nextMaintenance: nextMaintenance ? new Date(nextMaintenance) : null } : {}),
+      },
+    });
   }
 
   @Delete(':id')

@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { IsNotEmpty, IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator';
+import { IsEnum, IsNotEmpty, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { PermissionsGuard } from '../../../common/guards/permissions.guard';
@@ -43,9 +43,10 @@ class CloseSessionDto {
 
 class AddMovementDto {
   @ApiProperty({ enum: ['income', 'expense', 'withdrawal', 'deposit'] })
-  @IsString() @IsNotEmpty() type!: string;
+  // Ventas, devoluciones, apertura y cierre los registra el sistema: no se aceptan manualmente
+  @IsEnum(['income', 'expense', 'withdrawal', 'deposit']) type!: string;
   @ApiProperty() @IsNumber() @Min(0.01) @Type(() => Number) amount!: number;
-  @ApiProperty() @IsString() @IsNotEmpty() description!: string;
+  @ApiProperty() @IsString() @IsNotEmpty() @MaxLength(500) description!: string;
 }
 
 @ApiTags('Caja Registradora')
@@ -58,6 +59,17 @@ export class CashRegisterController {
     private readonly prisma: PrismaService,
   ) {}
 
+  /** Un usuario asignado a una sede solo opera las sesiones de su sede. */
+  private async assertSessionScope(sessionId: string, user: JwtPayload) {
+    if (!user.branchId) return;
+    const session = await this.prisma.cashRegisterSession.findFirst({
+      where: { id: sessionId, tenantId: user.tenantId },
+      select: { branchId: true },
+    });
+    if (!session) throw new NotFoundException('Sesión de caja no encontrada');
+    if (session.branchId !== user.branchId) throw new ForbiddenException('Solo puedes operar cajas de tu propia sede');
+  }
+
   @Post()
   @RequirePermissions(PERMISSIONS.CASH_REGISTER_MANAGE)
   @ApiOperation({ summary: 'Crear caja registradora' })
@@ -65,7 +77,12 @@ export class CashRegisterController {
     @Body() dto: CreateCashRegisterDto,
     @CurrentUser() user: JwtPayload,
   ) {
-    return this.cashRegisterUseCase.createRegister(user.tenantId, dto.branchId, dto.name, dto.code);
+    const branch = await this.prisma.branch.findFirst({
+      where: { id: dto.branchId, tenantId: user.tenantId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!branch) throw new BadRequestException('La sede no existe');
+    return this.cashRegisterUseCase.createRegister(user.tenantId, dto.branchId, dto.name.trim(), dto.code.trim().toUpperCase());
   }
 
   @Get()
@@ -147,6 +164,7 @@ export class CashRegisterController {
     @Body() dto: CloseSessionDto,
     @CurrentUser() user: JwtPayload,
   ) {
+    await this.assertSessionScope(sessionId, user);
     return this.cashRegisterUseCase.closeSession(
       sessionId,
       user.tenantId,
@@ -164,6 +182,7 @@ export class CashRegisterController {
     @Body() dto: AddMovementDto,
     @CurrentUser() user: JwtPayload,
   ) {
+    await this.assertSessionScope(sessionId, user);
     return this.cashRegisterUseCase.addMovement(
       sessionId,
       user.tenantId,

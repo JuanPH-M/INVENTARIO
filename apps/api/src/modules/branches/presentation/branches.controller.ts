@@ -29,6 +29,13 @@ import { BadRequestException } from '@nestjs/common';
 export class BranchesController {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** El encargado debe ser un usuario activo de la misma empresa. */
+  private async assertManager(tenantId: string, managerId?: string) {
+    if (!managerId) return;
+    const manager = await this.prisma.user.findFirst({ where: { id: managerId, tenantId, deletedAt: null }, select: { id: true } });
+    if (!manager) throw new BadRequestException('El encargado seleccionado no existe');
+  }
+
   @Get()
   @RequirePermissions(PERMISSIONS.BRANCHES_READ)
   @ApiOperation({ summary: 'Listar sucursales de la empresa' })
@@ -70,6 +77,7 @@ export class BranchesController {
     @CurrentUser() user: JwtPayload,
   ) {
     await this.checkBranchLimit(user.tenantId);
+    await this.assertManager(user.tenantId, dto.managerId);
     return this.prisma.branch.create({
       data: {
         tenantId: user.tenantId,
@@ -97,6 +105,7 @@ export class BranchesController {
       where: { id, tenantId: user.tenantId, deletedAt: null },
     });
     if (!branch) throw new NotFoundException('Sucursal no encontrada');
+    await this.assertManager(user.tenantId, dto.managerId);
 
     return this.prisma.branch.update({
       where: { id },

@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ShieldCheck } from 'lucide-react';
+import { PageHeader } from '@/components/common/page-header';
 import { apiClient } from '@/lib/api-client';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -88,13 +89,11 @@ export default function AuditPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <ShieldCheck className="h-6 w-6 text-primary" />
-          Bitácora de Auditoría
-        </h2>
-        <p className="text-muted-foreground">Registro de todas las acciones realizadas en el sistema</p>
-      </div>
+      <PageHeader
+        title="Auditoría"
+        description="Quién hizo qué y cuándo: registro inalterable de las acciones realizadas en el sistema"
+        icon={ShieldCheck}
+      />
 
       {/* Filters */}
       <Card>

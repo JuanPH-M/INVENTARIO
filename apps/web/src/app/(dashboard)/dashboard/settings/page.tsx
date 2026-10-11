@@ -3,6 +3,7 @@
 import { useEffect } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Settings, Building2, User, Moon, Sun, Monitor } from 'lucide-react';
+import { PageHeader } from '@/components/common/page-header';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -113,12 +114,7 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6 max-w-2xl">
-      <div>
-        <h2 className="text-2xl font-bold flex items-center gap-2">
-          <Settings className="h-6 w-6" /> Configuración
-        </h2>
-        <p className="text-muted-foreground text-sm">Gestiona la configuración de tu empresa y cuenta</p>
-      </div>
+      <PageHeader title="Configuración" description="Datos de la empresa, preferencias regionales y apariencia" icon={Settings} />
 
       {/* Empresa */}
       <Card>

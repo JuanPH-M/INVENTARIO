@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Delete, Get, HttpCode, HttpStatus,
+  BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus,
   NotFoundException, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -89,6 +89,11 @@ export class CalendarController {
   @RequirePermissions(PERMISSIONS.CALENDAR_CREATE)
   @ApiOperation({ summary: 'Crear evento' })
   async create(@Body() dto: CreateEventDto, @CurrentUser() user: JwtPayload) {
+    if (new Date(dto.endAt) < new Date(dto.startAt)) throw new BadRequestException('El fin debe ser posterior al inicio');
+    if (dto.branchId) {
+      const branch = await this.prisma.branch.findFirst({ where: { id: dto.branchId, tenantId: user.tenantId } });
+      if (!branch) throw new BadRequestException('La sede no existe');
+    }
     return this.prisma.calendarEvent.create({
       data: {
         tenantId: user.tenantId,
@@ -116,7 +121,7 @@ export class CalendarController {
     @Body() dto: UpdateEventDto,
     @CurrentUser() user: JwtPayload,
   ) {
-    const e = await this.prisma.calendarEvent.findFirst({ where: { id, tenantId: user.tenantId } });
+    const e = await this.prisma.calendarEvent.findFirst({ where: { id, tenantId: user.tenantId, deletedAt: null } });
     if (!e) throw new NotFoundException();
     return this.prisma.calendarEvent.update({
       where: { id },
@@ -133,7 +138,7 @@ export class CalendarController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Eliminar evento' })
   async remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: JwtPayload) {
-    const e = await this.prisma.calendarEvent.findFirst({ where: { id, tenantId: user.tenantId } });
+    const e = await this.prisma.calendarEvent.findFirst({ where: { id, tenantId: user.tenantId, deletedAt: null } });
     if (!e) throw new NotFoundException();
     await this.prisma.calendarEvent.update({ where: { id }, data: { deletedAt: new Date() } });
   }

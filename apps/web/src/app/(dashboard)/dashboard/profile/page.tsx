@@ -5,7 +5,8 @@ import { useMutation } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { User, Shield, KeyRound, Mail, Globe } from 'lucide-react';
+import { User, Shield, KeyRound, Mail, Globe, UserCircle } from 'lucide-react';
+import { PageHeader } from '@/components/common/page-header';
 import { useAuthStore } from '@/stores/auth.store';
 import { apiClient } from '@/lib/api-client';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -91,10 +92,7 @@ export default function ProfilePage() {
 
   return (
     <div className="space-y-6 max-w-2xl">
-      <div>
-        <h2 className="text-2xl font-bold">Mi perfil</h2>
-        <p className="text-muted-foreground text-sm">Gestiona tu información personal y seguridad</p>
-      </div>
+      <PageHeader title="Mi perfil" description="Tu información personal, contraseña y seguridad de la cuenta" icon={UserCircle} />
 
       {/* Avatar + info */}
       <Card>

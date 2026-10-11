@@ -10,6 +10,8 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --filter=@inventario/api --filter=@inventario/web",
+    "start": "turbo run start --filter=@inventario/api --filter=@inventario/web",
+    "produccion": "pnpm build && pnpm start",
     "test": "turbo run test",
     "test:e2e": "pnpm --filter @inventario/api test:e2e",
     "typecheck": "turbo run typecheck",

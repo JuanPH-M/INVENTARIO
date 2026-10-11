@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Brain, Send, TrendingDown, Lightbulb, AlertTriangle } from 'lucide-react';
+import { PageHeader } from '@/components/common/page-header';
 import { apiClient } from '@/lib/api-client';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -126,13 +127,11 @@ export default function AiPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <Brain className="h-6 w-6 text-primary" />
-          Inteligencia Artificial
-        </h2>
-        <p className="text-muted-foreground">Insights, predicciones y asistente IA para tu negocio</p>
-      </div>
+      <PageHeader
+        title="Inteligencia artificial"
+        description="Pronósticos de demanda, alertas de reabastecimiento y un asistente que responde con los datos de tu negocio"
+        icon={Brain}
+      />
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Insights */}

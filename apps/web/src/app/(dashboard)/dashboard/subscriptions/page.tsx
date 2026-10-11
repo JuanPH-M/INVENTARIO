@@ -3,7 +3,8 @@
 import { confirm } from '@/components/common/confirm-dialog';
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, X, CreditCard, AlertCircle, TrendingUp } from 'lucide-react';
+import { Plus, X, CreditCard, AlertCircle, TrendingUp, Repeat } from 'lucide-react';
+import { PageHeader } from '@/components/common/page-header';
 import { apiClient } from '@/lib/api-client';
 import { formatCurrency } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -107,7 +108,9 @@ export default function SubscriptionsPage() {
       const params: Record<string, string> = {};
       if (statusFilter) params.status = statusFilter;
       const { data } = await apiClient.get('/subscriptions', { params });
-      return data.data ?? { items: [], total: 0 };
+      // La API responde { data: [...], meta: { total } }
+      const page = data.data;
+      return { items: Array.isArray(page?.data) ? page.data : [], total: page?.meta?.total ?? 0 };
     },
   });
 
@@ -159,15 +162,16 @@ export default function SubscriptionsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">Suscripciones</h2>
-          <p className="text-muted-foreground">Gestión de suscripciones y servicios recurrentes</p>
-        </div>
-        <Button onClick={() => { setShowCreate(true); setError(''); }}>
-          <Plus className="h-4 w-4 mr-2" /> Nueva Suscripción
-        </Button>
-      </div>
+      <PageHeader
+        title="Suscripciones"
+        description="Servicios y pagos recurrentes de la empresa con alertas de renovación"
+        icon={Repeat}
+        actions={
+          <Button onClick={() => { setShowCreate(true); setError(''); }}>
+            <Plus /> Nueva suscripción
+          </Button>
+        }
+      />
 
       {/* Stats */}
       <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
@@ -197,10 +201,10 @@ export default function SubscriptionsPage() {
                 <p className="text-xs text-muted-foreground mt-1">suscripciones vigentes</p>
               </CardContent>
             </Card>
-            <Card className={stats?.upcomingRenewals && stats.upcomingRenewals.length > 0 ? 'border-yellow-300 dark:border-yellow-700' : ''}>
+            <Card className={stats?.upcomingRenewals && stats.upcomingRenewals.length > 0 ? 'border-warning/50' : ''}>
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1">
-                  <AlertCircle className="h-4 w-4 text-yellow-500" /> Próximas renovaciones
+                  <AlertCircle className="h-4 w-4 text-warning" /> Próximas renovaciones
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -223,9 +227,9 @@ export default function SubscriptionsPage() {
 
       {/* Upcoming renewals alert */}
       {stats?.upcomingRenewals && stats.upcomingRenewals.length > 0 && (
-        <Card className="border-yellow-200 bg-yellow-50 dark:bg-yellow-900/10 dark:border-yellow-800">
+        <Card className="border-warning/40 bg-warning/5">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2 text-yellow-800 dark:text-yellow-200">
+            <CardTitle className="text-sm flex items-center gap-2 text-warning">
               <AlertCircle className="h-4 w-4" /> Renovaciones próximas
             </CardTitle>
           </CardHeader>
@@ -235,8 +239,8 @@ export default function SubscriptionsPage() {
                 const days = daysUntil(s.renewalDate);
                 return (
                   <div key={s.id} className="flex items-center justify-between text-sm">
-                    <span className="text-yellow-800 dark:text-yellow-200 font-medium">{s.name}</span>
-                    <span className="text-yellow-700 dark:text-yellow-300 text-xs">
+                    <span className="text-warning font-medium">{s.name}</span>
+                    <span className="text-muted-foreground text-xs">
                       {days === 0 ? 'Hoy' : days === 1 ? 'Mañana' : `en ${days} días`}
                     </span>
                   </div>
@@ -281,7 +285,7 @@ export default function SubscriptionsPage() {
             const days = daysUntil(sub.renewalDate);
             const renewalSoon = days >= 0 && days <= 30;
             return (
-              <Card key={sub.id} className={renewalSoon && sub.status === 'active' ? 'border-yellow-300 dark:border-yellow-700' : ''}>
+              <Card key={sub.id} className={renewalSoon && sub.status === 'active' ? 'border-warning/50' : ''}>
                 <CardContent className="py-4">
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
@@ -297,7 +301,7 @@ export default function SubscriptionsPage() {
                       <div className="flex flex-wrap gap-3 mt-2 text-xs text-muted-foreground">
                         {sub.monthlyCost && <span>Mensual: {formatCurrency(Number(sub.monthlyCost))} {sub.currency ?? ''}</span>}
                         {sub.annualCost && <span>Anual: {formatCurrency(Number(sub.annualCost))} {sub.currency ?? ''}</span>}
-                        <span className={renewalSoon && sub.status === 'active' ? 'text-yellow-600 font-medium' : ''}>
+                        <span className={renewalSoon && sub.status === 'active' ? 'text-warning font-medium' : ''}>
                           Renovación: {new Date(sub.renewalDate).toLocaleDateString('es-CO')}
                           {renewalSoon ? ` (${days === 0 ? 'hoy' : days === 1 ? 'mañana' : `en ${days} días`})` : ''}
                         </span>

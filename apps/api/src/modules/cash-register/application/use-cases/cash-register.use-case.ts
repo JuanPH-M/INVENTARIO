@@ -74,27 +74,31 @@ export class CashRegisterUseCase {
     const reconciliation = await this.calculateReconciliation(sessionId, Number(session.openingAmount));
     const difference = actualAmount - reconciliation.expectedAmount;
 
-    await this.prisma.cashRegisterSession.update({
-      where: { id: sessionId },
-      data: {
-        closedById,
-        closedAt: new Date(),
-        status: 'closed',
-        actualClosingAmount: actualAmount,
-        expectedClosingAmount: reconciliation.expectedAmount,
-        difference,
-        notes,
-      },
-    });
+    await this.prisma.$transaction(async (tx) => {
+      // Solo una petición puede cerrar la sesión (evita cierres dobles simultáneos)
+      const closed = await tx.cashRegisterSession.updateMany({
+        where: { id: sessionId, status: 'open' },
+        data: {
+          closedById,
+          closedAt: new Date(),
+          status: 'closed',
+          actualClosingAmount: actualAmount,
+          expectedClosingAmount: reconciliation.expectedAmount,
+          difference,
+          notes,
+        },
+      });
+      if (closed.count === 0) throw new ConflictException('La sesión ya fue cerrada');
 
-    await this.prisma.cashRegisterMovement.create({
-      data: {
-        sessionId,
-        type: 'closing',
-        amount: actualAmount,
-        description: `Cierre de caja. Diferencia: $${difference.toFixed(0)}`,
-        performedById: closedById,
-      },
+      await tx.cashRegisterMovement.create({
+        data: {
+          sessionId,
+          type: 'closing',
+          amount: actualAmount,
+          description: `Cierre de caja. Diferencia: ${difference.toFixed(0)}`,
+          performedById: closedById,
+        },
+      });
     });
 
     return { ...reconciliation, actualAmount, difference };

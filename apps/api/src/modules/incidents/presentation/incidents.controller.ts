@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Get, HttpCode, HttpStatus,
+  BadRequestException, Body, Controller, Get, HttpCode, HttpStatus,
   NotFoundException, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -46,25 +46,52 @@ class AddCommentDto {
 export class IncidentsController {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Evita asociar la incidencia a sedes o usuarios de otra empresa. */
+  private async assertOwnership(tenantId: string, branchId?: string, assignedToId?: string) {
+    if (branchId) {
+      const branch = await this.prisma.branch.findFirst({ where: { id: branchId, tenantId }, select: { id: true } });
+      if (!branch) throw new BadRequestException('La sede no existe');
+    }
+    if (assignedToId) {
+      const assignee = await this.prisma.user.findFirst({
+        where: { id: assignedToId, tenantId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!assignee) throw new BadRequestException('El usuario asignado no existe');
+    }
+  }
+
   @Get()
   @RequirePermissions(PERMISSIONS.INCIDENTS_READ)
   @ApiOperation({ summary: 'Listar incidencias' })
   async findAll(
     @CurrentUser() user: JwtPayload,
     @Query('page') page?: number,
+    @Query('limit') limit?: number,
     @Query('status') status?: string,
     @Query('type') type?: string,
     @Query('severity') severity?: string,
     @Query('branchId') branchId?: string,
+    @Query('search') search?: string,
   ) {
-    const { page: p, limit: l, skip } = parsePaginationParams(page, 20);
+    const { page: p, limit: l, skip } = parsePaginationParams(page, limit ?? 20);
     const where = {
       tenantId: user.tenantId,
       deletedAt: null as null,
-      ...(status ? { status } : {}),
+      // Acepta varios estados separados por coma (ej. "open,in_progress")
+      ...(status ? (status.includes(',') ? { status: { in: status.split(',') } } : { status }) : {}),
       ...(type ? { type } : {}),
       ...(severity ? { severity } : {}),
       ...(branchId ? { branchId } : {}),
+      ...(search
+        ? {
+            OR: [
+              { title: { contains: search, mode: 'insensitive' as const } },
+              { ticketNumber: { contains: search, mode: 'insensitive' as const } },
+              { description: { contains: search, mode: 'insensitive' as const } },
+            ],
+          }
+        : {}),
     };
     const [items, total] = await Promise.all([
       this.prisma.incident.findMany({
@@ -86,21 +113,32 @@ export class IncidentsController {
   @ApiOperation({ summary: 'Obtener incidencia' })
   async findOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: JwtPayload) {
     const incident = await this.prisma.incident.findFirst({
-      where: { id, tenantId: user.tenantId },
+      where: { id, tenantId: user.tenantId, deletedAt: null },
       include: {
         comments: { orderBy: { createdAt: 'asc' } },
+        branch: { select: { name: true } },
         reportedBy: { select: { firstName: true, lastName: true } },
         assignedTo: { select: { firstName: true, lastName: true } },
       },
     });
     if (!incident) throw new NotFoundException();
-    return incident;
+    const authorIds = [...new Set(incident.comments.map((c) => c.createdById))];
+    const authors = await this.prisma.user.findMany({
+      where: { id: { in: authorIds }, tenantId: user.tenantId },
+      select: { id: true, firstName: true, lastName: true },
+    });
+    const byId = new Map(authors.map((a) => [a.id, `${a.firstName} ${a.lastName}`]));
+    return {
+      ...incident,
+      comments: incident.comments.map((c) => ({ ...c, author: byId.get(c.createdById) ?? 'Usuario' })),
+    };
   }
 
   @Post()
   @RequirePermissions(PERMISSIONS.INCIDENTS_CREATE)
   @ApiOperation({ summary: 'Reportar incidencia' })
   async create(@Body() dto: CreateIncidentDto, @CurrentUser() user: JwtPayload) {
+    await this.assertOwnership(user.tenantId, dto.branchId, dto.assignedToId);
     const year = new Date().getFullYear();
     for (let attempt = 0; attempt < 5; attempt++) {
       const count = await this.prisma.incident.count({ where: { tenantId: user.tenantId } });
@@ -136,13 +174,17 @@ export class IncidentsController {
     @Body() dto: UpdateIncidentDto,
     @CurrentUser() user: JwtPayload,
   ) {
-    const i = await this.prisma.incident.findFirst({ where: { id, tenantId: user.tenantId } });
+    const i = await this.prisma.incident.findFirst({ where: { id, tenantId: user.tenantId, deletedAt: null } });
     if (!i) throw new NotFoundException();
+    await this.assertOwnership(user.tenantId, undefined, dto.assignedToId);
+    const closing = (dto.status === 'resolved' || dto.status === 'closed') && !i.resolvedAt;
+    const reopening = dto.status === 'open' || dto.status === 'in_progress';
     return this.prisma.incident.update({
       where: { id },
       data: {
         ...dto,
-        ...(dto.status === 'resolved' || dto.status === 'closed' ? { resolvedAt: new Date() } : {}),
+        ...(closing ? { resolvedAt: new Date() } : {}),
+        ...(reopening ? { resolvedAt: null } : {}),
       },
     });
   }
@@ -155,7 +197,7 @@ export class IncidentsController {
     @Body() dto: AddCommentDto,
     @CurrentUser() user: JwtPayload,
   ) {
-    const i = await this.prisma.incident.findFirst({ where: { id, tenantId: user.tenantId } });
+    const i = await this.prisma.incident.findFirst({ where: { id, tenantId: user.tenantId, deletedAt: null } });
     if (!i) throw new NotFoundException();
     return this.prisma.incidentComment.create({ data: { incidentId: id, content: dto.content, createdById: user.sub } });
   }

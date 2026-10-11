@@ -5,7 +5,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ClipboardList, Download, Loader2, RefreshCw, FileText,
   Calendar, CalendarDays, CalendarRange, History,
+  FileBarChart,
 } from 'lucide-react';
+import { PageHeader } from '@/components/common/page-header';
 import { apiClient } from '@/lib/api-client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -83,12 +85,12 @@ function formatBytes(b: number) {
 
 function periodBadgeColor(p: string | null) {
   const map: Record<string, string> = {
-    daily: 'bg-blue-100 text-blue-800',
-    weekly: 'bg-purple-100 text-purple-800',
-    monthly: 'bg-green-100 text-green-800',
-    annual: 'bg-orange-100 text-orange-800',
+    daily: 'bg-info/10 text-info',
+    weekly: 'bg-primary/10 text-primary',
+    monthly: 'bg-success/10 text-success',
+    annual: 'bg-warning/15 text-warning',
   };
-  return map[p ?? ''] ?? 'bg-gray-100 text-gray-700';
+  return map[p ?? ''] ?? 'bg-muted text-muted-foreground';
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -169,10 +171,11 @@ export default function ReportsPage() {
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold">Reportes</h2>
-        <p className="text-muted-foreground text-sm">Genera, almacena y descarga reportes del negocio</p>
-      </div>
+      <PageHeader
+        title="Reportes"
+        description="Exporta ventas, inventario, compras y finanzas a Excel o PDF, al momento o programados"
+        icon={FileBarChart}
+      />
 
       <Tabs defaultValue="ondemand">
         <TabsList>
@@ -308,11 +311,11 @@ export default function ReportsPage() {
               </Button>
 
               {generateMutation.isSuccess && generateMutation.data && (
-                <div className="flex items-center gap-3 p-3 rounded-lg bg-green-50 border border-green-200">
-                  <FileText className="h-5 w-5 text-green-600 shrink-0" />
+                <div className="flex items-center gap-3 p-3 rounded-lg bg-success/5 border border-success/30">
+                  <FileText className="h-5 w-5 text-success shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-green-800 truncate">{generateMutation.data.title}</p>
-                    <p className="text-xs text-green-600">{generateMutation.data.rowCount} registros</p>
+                    <p className="text-sm font-medium truncate">{generateMutation.data.title}</p>
+                    <p className="text-xs text-muted-foreground">{generateMutation.data.rowCount} registros</p>
                   </div>
                   <a href={generateMutation.data.downloadUrl} target="_blank" rel="noreferrer">
                     <Button size="sm" variant="outline"><Download className="h-3.5 w-3.5" /></Button>

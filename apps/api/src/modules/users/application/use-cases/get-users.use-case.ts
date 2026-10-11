@@ -59,8 +59,10 @@ export class GetUsersUseCase {
           createdAt: true,
           userRoles: {
             select: {
-              role: { select: { name: true, slug: true } },
-              branch: { select: { name: true } },
+              roleId: true,
+              branchId: true,
+              role: { select: { id: true, name: true, slug: true } },
+              branch: { select: { id: true, name: true } },
             },
           },
         },

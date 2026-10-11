@@ -213,6 +213,15 @@ La empresa demo trae **3 tiendas + 1 bodega central, 22 productos, 18 clientes y
 | Correos de prueba (Mailhog) | http://localhost:8025 |
 | Explorador de base de datos | `pnpm db:studio` |
 
+### Modo desarrollo vs. modo producción local
+
+| Comando | Para qué sirve | Velocidad |
+|---|---|---|
+| `pnpm dev` | Programar: recarga automática al guardar cambios (Turbopack). | Cada pantalla tarda 1–3 s **la primera vez** que se abre mientras se compila. |
+| `pnpm produccion` | Usar el sistema en el día a día (una tienda, o el servidor de una cadena en red local). Compila todo una vez y lo sirve optimizado. | Todas las pantallas abren al instante. |
+
+`pnpm produccion` equivale a `pnpm build` seguido de `pnpm start`. Si ya compilaste y no cambiaste el código, basta con `pnpm start`.
+
 ---
 
 ## Instalación en producción con Docker

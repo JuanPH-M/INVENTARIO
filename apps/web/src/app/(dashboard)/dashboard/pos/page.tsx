@@ -218,6 +218,7 @@ export default function PosPage() {
       void qc.invalidateQueries({ queryKey: ['analytics'] });
       void qc.invalidateQueries({ queryKey: ['sales'] });
       void qc.invalidateQueries({ queryKey: ['cash-register'] });
+      void qc.invalidateQueries({ queryKey: ['cash'] });
     },
     onError: (err) => toast({ variant: 'destructive', title: 'No se pudo registrar la venta', description: getErrorMessage(err) }),
   });

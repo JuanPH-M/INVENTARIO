@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -66,6 +67,7 @@ export class DocumentsController {
     @Query('clientId') clientId?: string,
     @Query('referenceType') referenceType?: string,
     @Query('referenceId') referenceId?: string,
+    @Query('search') search?: string,
   ) {
     const { page: p, limit: l, skip } = parsePaginationParams(page, limit);
     const where = {
@@ -75,9 +77,26 @@ export class DocumentsController {
       ...(clientId ? { clientId } : {}),
       ...(referenceType ? { referenceType } : {}),
       ...(referenceId ? { referenceId } : {}),
+      ...(search
+        ? {
+            OR: [
+              { title: { contains: search, mode: 'insensitive' as const } },
+              { description: { contains: search, mode: 'insensitive' as const } },
+            ],
+          }
+        : {}),
     };
     const [items, total] = await Promise.all([
-      this.prisma.document.findMany({ where, skip, take: l, orderBy: { createdAt: 'desc' } }),
+      this.prisma.document.findMany({
+        where,
+        skip,
+        take: l,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          client: { select: { firstName: true, lastName: true, businessName: true } },
+          branch: { select: { name: true } },
+        },
+      }),
       this.prisma.document.count({ where }),
     ]);
     return paginate(items, total, p, l);
@@ -105,6 +124,7 @@ export class DocumentsController {
     @Body() dto: CreateDocumentDto,
     @CurrentUser() user: JwtPayload,
   ) {
+    if (!file) throw new BadRequestException('Adjunta un archivo');
     const result = await this.storageService.upload(file, {
       tenantId: user.tenantId,
       module: 'documents',
@@ -159,7 +179,7 @@ export class DocumentsController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Eliminar documento' })
   async remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: JwtPayload) {
-    const doc = await this.prisma.document.findFirst({ where: { id, tenantId: user.tenantId } });
+    const doc = await this.prisma.document.findFirst({ where: { id, tenantId: user.tenantId, deletedAt: null } });
     if (!doc) throw new NotFoundException();
     await this.prisma.document.update({ where: { id }, data: { deletedAt: new Date(), status: 'archived' } });
   }
